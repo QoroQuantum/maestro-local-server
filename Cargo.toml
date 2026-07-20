@@ -1,0 +1,8 @@
+[package]
+name = "maestro-local-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
+systemd-service = { version = "0.3.1" }
