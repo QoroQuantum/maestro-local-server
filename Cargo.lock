@@ -39,7 +39,6 @@ name = "maestro-local-server"
 version = "0.1.0"
 dependencies = [
  "signal-hook",
- "systemd-service",
 ]
 
 [[package]]
@@ -68,12 +67,6 @@ dependencies = [
  "errno",
  "libc",
 ]
-
-[[package]]
-name = "systemd-service"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1d641ee0242df9b48b5090ae27eab6b50ebe40fad5528260e2129bf090ae087"
 
 [[package]]
 name = "windows-link"

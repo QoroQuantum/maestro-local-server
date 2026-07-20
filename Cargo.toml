@@ -2,7 +2,22 @@
 name = "maestro-local-server"
 version = "0.1.0"
 edition = "2024"
+description = "Maestro local server"
+authors = ["Qoro Quantum <team@qoroquantum.de>"]
+
+[package.metadata.deb]
+depends = "$auto, systemd"
+extended-description = "Maestro local server"
+section = "admin"
+priority = "optional"
+copyright = "© copyright Qoro Quantum"
+assets = [
+    ["target/release/maestro-local-server", "usr/bin/maestro-local-server", "755"],
+    ["debian/maestro.service", "lib/systemd/system/maestro.service", "644"]
+]
+maintainer-scripts = "debian/scripts"
 
 [dependencies]
 signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
-systemd-service = { version = "0.3.1" }
+
+

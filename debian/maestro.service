@@ -1,0 +1,13 @@
+[Unit]
+AssertPathExists=/usr/bin/maestro-local-server
+
+[Service]
+WorkingDirectory=~
+ExecStart=/usr/bin/maestro-local-server
+Restart=always
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+Alias=maestro-local-server
+WantedBy=default.target
