@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Maestro local server"
 authors = ["Qoro Quantum <team@qoroquantum.de>"]
+build = "build.rs"
 
 [package.metadata.deb]
 depends = "$auto, systemd"
@@ -19,6 +20,9 @@ maintainer-scripts = "debian/scripts"
 
 [dependencies]
 signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
+
+[build-dependencies]
+bindgen = "*"
 
 
 
