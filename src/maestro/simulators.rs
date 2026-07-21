@@ -19,8 +19,6 @@ pub fn new(nrQubits: i32) -> Self {
 	GetMaestroObjectWithMute();
 	let handle = CreateSimpleSimulator(nrQubits);
 
-	println!("Handle is {}", handle);
-
 	Self {
 	    handle
 	}
@@ -163,6 +161,6 @@ mod tests {
 	assert!(simulator.IsValid(), "Simulator is not valid, handle is zero");
 
 	let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 0);
-        assert!(res == true, "RemoveAllOptimizationSimulatorsAndAdd returned false");
+        assert!(res, "RemoveAllOptimizationSimulatorsAndAdd returned false");
     }
 }
