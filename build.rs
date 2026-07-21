@@ -4,14 +4,30 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Tell cargo to look for shared libraries in the specified directory
+    //println!("cargo:rustc-link-search=/path/to/lib");
+
+    // Tell cargo to tell rustc to link the maestro
+    // shared library, dynamically
     println!("cargo:rustc-link-lib=dylib=maestro");
 
+    // The bindgen::Builder is the main entry point
+    // to bindgen, and lets you build up options for
+    // the resulting bindings.
     let bindings = bindgen::Builder::default()
+	// clang args, we use c++17, although we expose C api
 	.clang_args(["-x", "c++", "-std=c++17"].iter())
+        // The input header we would like to generate
+        // bindings for.
         .header("wrapper.h")
+        // Tell cargo to invalidate the built crate whenever any of the
+        // included header files changed.
+	.parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        // Finish the builder and generate the bindings.
         .generate()
         .expect("Unable to generate bindings");
 
+    // Write the bindings to the $OUT_DIR/bindings.rs file.
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("bindings.rs"))
