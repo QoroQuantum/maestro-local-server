@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::io::{Error, ErrorKind};
 
-
 fn server() -> std::io::Result<()> {
     let socket_path = "/tmp/maestro.sock";
 
@@ -31,11 +30,11 @@ fn server() -> std::io::Result<()> {
     for stream in listener.incoming() {
 	match stream {
 	    Ok(socket) => {
-		let handled = handle_connection(socket);
-		match handled {
-		    Ok(_) => continue,
-		    Err(_) => break
-                }
+		    let handled = handle_connection(socket);
+		    match handled {
+		        Ok(_) => continue,
+		        Err(_) => break
+            }
 	    },
 	    Err(_) => break
 	}
@@ -53,7 +52,7 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
     stream.read_to_string(&mut message)?;
 
     if message.is_empty() {
-	return Err(Error::new(ErrorKind::Other, "Disconnect"));
+	    return Err(Error::new(ErrorKind::Other, "Disconnect"));
     }
 
     println!("Received message: {}\nReplying...", message);
