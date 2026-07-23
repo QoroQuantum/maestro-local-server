@@ -1,30 +1,54 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+//use libloading::{Library, Symbol};
+//use std::sync::Arc;
+
 
 use std::ffi::CString;
 extern crate json;
 
 
+//type GetMaestroObjectWithMuteFn = unsafe extern "C" fn() -> *mut std::os::raw::c_void;
+
 #[derive(Debug)]
 pub struct SimpleSimulator {
     handle : ::std::os::raw::c_ulong,
+    //lib : Arc::<Library>,
+    //get_maestro_object_with_mute_fn : Arc<Symbol<'a, GetMaestroObjectWithMuteFn>>,
 }
 
 impl SimpleSimulator {
 
 pub fn new(nrQubits: i32) -> Self {
     unsafe {
-	    GetMaestroObjectWithMute();
+        //let lib = Arc::new(Library::new("libmaestro.so").unwrap());
+        //let get_maestro_object_with_mute_fn: Symbol<GetMaestroObjectWithMuteFn> = lib.get(b"GetMaestroObjectWithMute").unwrap();
+
+	    //let obj = get_maestro_object_with_mute_fn();
+
+        let obj = GetMaestroObjectWithMute();
+
+        if obj == std::ptr::null_mut() {
+            eprintln!("Failed to get Maestro object.");
+        }
+
 	    let handle = CreateSimpleSimulator(nrQubits);
 
-	    Self {
-	        handle
-	    }
+        if handle == 0 {
+            eprintln!("Failed to create SimpleSimulator.");
+        }
+
+        Self { handle }
     }
 }
+
+pub fn GetMaestroObject() -> *mut std::os::raw::c_void {
+    unsafe {
+        GetMaestroObjectWithMute()
+    }
+}
+
 
 pub fn IsValid(&mut self) -> bool {
     self.handle != 0
@@ -157,15 +181,17 @@ simulatorPtr: ::std::os::raw::c_ulong,
 
 
 #[cfg(test)]
-mod tests {
+mod tests_simulator {
     use super::*;
 
     #[test]
+    #[serial]
     fn simple_execute() {
+        //let obj = SimpleSimulator::GetMaestroObject();
 	    let mut simulator = SimpleSimulator::new(5);
 	    assert!(simulator.IsValid(), "Simulator is not valid, handle is zero");
 
-	    let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 0);
+	    let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 1);
         assert!(res, "RemoveAllOptimizationSimulatorsAndAdd returned false");
 
         let qasm = "OPENQASM 2.0; \
@@ -175,11 +201,14 @@ mod tests {
             cx q[0],q[1]; \
             measure q[0]->c[0]; \
             measure q[1]->c[1];".to_string();
+        
         let execRes = simulator.Execute(qasm, String::new());
+        simulator.destroy();
 
         assert!(!execRes.is_empty(), "Execute returned empty string");
 
         let res_str: &str = &execRes;
+
         let parsed = json::parse(res_str).unwrap();
         
         assert!(parsed.has_key("counts"), "Execute result does not have 'counts' key");
@@ -190,6 +219,41 @@ mod tests {
         assert!(parsed["counts"].has_key("11000"), "Execute result counts does not have '11000' key");
         assert!(parsed["counts"]["11000"].as_i32().unwrap() == 1, "Execute result counts '11000' value is not 1");
         assert!(parsed["simulator"] == "qcsim", "Execute result simulator is not 'qcsim'");
-        assert!(parsed["method"] == "statevector", "Execute result method is not 'statevector'");
+        assert!(parsed["method"] == "matrix_product_state", "Execute result method is not 'matrix_product_state'");
+    }
+
+    #[test]
+    #[serial]
+    fn simple_estimate() {
+        //let obj = SimpleSimulator::GetMaestroObject();
+	    let mut simulator = SimpleSimulator::new(5);
+	    assert!(simulator.IsValid(), "Simulator is not valid, handle is zero");
+
+	    let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 1);
+        assert!(res, "RemoveAllOptimizationSimulatorsAndAdd returned false");
+
+        let qasm = "OPENQASM 2.0; \
+            creg c[3]; \
+            qreg q[3]; \
+            x q[0]; \
+            cx q[0],q[1];".to_string();
+        
+        let execRes = simulator.Estimate(qasm, "zzz".to_string(), "".to_string());
+        simulator.destroy();
+
+        assert!(!execRes.is_empty(), "Estimate returned empty string");
+
+        let res_str: &str = &execRes;
+
+        let parsed = json::parse(res_str).unwrap();
+        
+        assert!(parsed.has_key("expectation_values"), "Estimate result does not have 'expectation_values' key");
+        assert!(parsed.has_key("time_taken"), "Estimate result does not have 'time_taken' key");
+        assert!(parsed.has_key("simulator"), "Estimate result does not have 'simulator' key");
+        assert!(parsed.has_key("method"), "Estimate result does not have 'method' key");
+
+        // expectation_values is a list of floats, check if the result is meaningful!
+        assert!(parsed["simulator"] == "qcsim", "Estimate result simulator is not 'qcsim'");
+        assert!(parsed["method"] == "matrix_product_state", "Estimate result method is not 'matrix_product_state'");
     }
 }

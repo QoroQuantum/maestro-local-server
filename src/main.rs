@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::io::{Error, ErrorKind};
 
+
 fn server() -> std::io::Result<()> {
     let socket_path = "/tmp/maestro.sock";
 
@@ -28,16 +29,16 @@ fn server() -> std::io::Result<()> {
     println!("Server is listening...");
 
     for stream in listener.incoming() {
-	match stream {
-	    Ok(socket) => {
-		    let handled = handle_connection(socket);
-		    match handled {
-		        Ok(_) => continue,
-		        Err(_) => break
-            }
-	    },
-	    Err(_) => break
-	}
+	    match stream {
+	        Ok(socket) => {
+		        let handled = handle_connection(socket);
+		        match handled {
+		            Ok(_) => continue,
+		            Err(_) => break
+                }
+	        },
+	        Err(_) => break
+	    }
     }
 
     println!("Listener shut down...");
@@ -63,6 +64,7 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
 }
 
 fn main() {
+    //let obj = maestro::simulators::SimpleSimulator::GetMaestroObject();
     println!("Starting Maestro Local Server...");
 
     let running = Arc::new(AtomicBool::new(true));
@@ -116,6 +118,10 @@ fn main() {
 
     let t = thread::spawn(|| server());
 
+    // start runner as well
+    let runner = maestro::runner::Runner::new();
+    let rhandle = maestro::runner::Runner::run(Arc::clone(&runner));
+
     // Main thread block until workers finish
     // The loop keeps the main thread alive. When the signal thread flips the flag,
     // the while loop terminates, and we move to the join phase.
@@ -143,6 +149,10 @@ fn main() {
     let _ = drop_stream.shutdown(Shutdown::Both);
 
     let _ = t.join();
+
+    // Stop the runner thread
+    runner.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = rhandle.join();
 
     println!("Maestro Local Server shut down gracefully.");
 }
