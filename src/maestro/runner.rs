@@ -1,11 +1,7 @@
-//use std::io::{Error, ErrorKind};
 use std::collections::VecDeque; // for tasks queue
 use std::collections::HashMap; // for results
 use std::thread;
 
-
-
-//use std::sync::mpsc; 
 use std::sync::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -49,11 +45,11 @@ pub fn new(session_id: u32, task_id : u32, task_type: TaskType, qasm: String, ob
 
 pub fn execute(&mut self) -> String {
     let mut simulator = maestro::simulators::SimpleSimulator::new(self.nr_qubits);
-    let _res = simulator.RemoveAllOptimizationSimulatorsAndAdd(self.sim_type, self.method);
+    let _res = simulator.remove_all_optimization_simulators_and_add(self.sim_type, self.method);
 
     let result = match self.task_type {
-        TaskType::Execute => simulator.Execute(self.qasm.clone(), self.options.clone()),
-        TaskType::Estimate => simulator.Estimate(self.qasm.clone(), self.observables.clone(), self.options.clone())
+        TaskType::Execute => simulator.execute(self.qasm.clone(), self.options.clone()),
+        TaskType::Estimate => simulator.estimate(self.qasm.clone(), self.observables.clone(), self.options.clone())
     };
 
     simulator.destroy();
@@ -86,10 +82,9 @@ pub fn new(session_id: u32, task_id : u32, result: String) -> TaskResult {
 
 #[derive(Debug)]
 pub struct Runner {
-    pub tasks_queue: Mutex<VecDeque<Task>>,
-    pub results_map: Mutex<HashMap<u64, TaskResult>>,
-    pub stop: AtomicBool,
-//    the_thread: std::thread::JoinHandle<i32>,
+    tasks_queue: Mutex<VecDeque<Task>>,
+    results_map: Mutex<HashMap<u64, TaskResult>>,
+    stop: AtomicBool,
 }
 
 impl Runner {
@@ -105,10 +100,7 @@ pub fn new() -> Arc<Runner> {
         tasks_queue : tasks_mutex,
         results_map : results_mutex,
         stop : std::sync::atomic::AtomicBool::new(false),
-        //the_thread: std::thread::spawn(|| { 0 }),
     };
-
-    //myself.run();
 
     Arc::new(myself)
 }
@@ -146,9 +138,24 @@ pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
     the_thread
 }
 
+pub fn stop(&self) {
+    self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn add_task(&self, task: Task) {
     let mut queue = self.tasks_queue.lock().unwrap();
     queue.push_back(task);
+}
+
+pub fn is_task_result_available(&self, session_id: u32, task_id: u32) -> bool {
+    let results = self.results_map.lock().unwrap();
+    results.contains_key(&((session_id as u64) << 32 | (task_id as u64)))
+}
+
+pub fn get_result(&self, session_id: u32, task_id: u32) -> Option<TaskResult> {
+    let mut results = self.results_map.lock().unwrap();
+
+    results.remove(&((session_id as u64) << 32 | (task_id as u64)))
 }
 
 }
@@ -157,6 +164,7 @@ pub fn add_task(&self, task: Task) {
 #[cfg(test)]
 mod tests_runner {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     #[serial]

@@ -1,39 +1,25 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
-//use libloading::{Library, Symbol};
-//use std::sync::Arc;
-
-
 use std::ffi::CString;
 extern crate json;
-
-
-//type GetMaestroObjectWithMuteFn = unsafe extern "C" fn() -> *mut std::os::raw::c_void;
 
 #[derive(Debug)]
 pub struct SimpleSimulator {
     handle : ::std::os::raw::c_ulong,
-    //lib : Arc::<Library>,
-    //get_maestro_object_with_mute_fn : Arc<Symbol<'a, GetMaestroObjectWithMuteFn>>,
 }
 
 impl SimpleSimulator {
 
-pub fn new(nrQubits: i32) -> Self {
+pub fn new(nr_qubits: i32) -> Self {
     unsafe {
-        //let lib = Arc::new(Library::new("libmaestro.so").unwrap());
-        //let get_maestro_object_with_mute_fn: Symbol<GetMaestroObjectWithMuteFn> = lib.get(b"GetMaestroObjectWithMute").unwrap();
-
-	    //let obj = get_maestro_object_with_mute_fn();
-
         let obj = GetMaestroObjectWithMute();
 
         if obj == std::ptr::null_mut() {
             eprintln!("Failed to get Maestro object.");
         }
 
-	    let handle = CreateSimpleSimulator(nrQubits);
+	    let handle = CreateSimpleSimulator(nr_qubits);
 
         if handle == 0 {
             eprintln!("Failed to create SimpleSimulator.");
@@ -43,14 +29,14 @@ pub fn new(nrQubits: i32) -> Self {
     }
 }
 
-pub fn GetMaestroObject() -> *mut std::os::raw::c_void {
+pub fn get_maestro_object() -> *mut std::os::raw::c_void {
     unsafe {
         GetMaestroObjectWithMute()
     }
 }
 
 
-pub fn IsValid(&mut self) -> bool {
+pub fn is_valid(&mut self) -> bool {
     self.handle != 0
 }
 
@@ -64,32 +50,32 @@ pub fn destroy(&mut self) {
     }
 }
 
-pub fn RemoveAllOptimizationSimulatorsAndAdd(&mut self, simType: i32, simExecType: i32) -> bool {
+pub fn remove_all_optimization_simulators_and_add(&mut self, sim_type: i32, sim_exec_type: i32) -> bool {
     if self.handle == 0 {
 	    return false;
     } 
 
     unsafe {
-	    RemoveAllOptimizationSimulatorsAndAdd(self.handle, simType, simExecType) == 1
+	    RemoveAllOptimizationSimulatorsAndAdd(self.handle, sim_type, sim_exec_type) == 1
     }
 }
 
-pub fn AddOptimizationSimulator(&mut self, simType: i32, simExecType: i32) -> bool {
+pub fn add_optimization_simulator(&mut self, sim_type: i32, sim_exec_type: i32) -> bool {
     if self.handle == 0 {
 	    return false;
     } 
 
     unsafe {
-	    AddOptimizationSimulator(self.handle, simType, simExecType) == 1
+	    AddOptimizationSimulator(self.handle, sim_type, sim_exec_type) == 1
     }
 }
 
-pub fn Execute(&mut self, jsonCircuit: String, jsonConfig: String) -> String {
+pub fn execute(&mut self, json_circuit: String, json_config: String) -> String {
     if self.handle == 0 {
 	    return "".to_string();
     } 
 
-    let c_jsonCircuit_string = match CString::new(jsonCircuit) {
+    let c_json_circuit_string = match CString::new(json_circuit) {
         Ok(cstr) => cstr,
         Err(_) => {
             eprintln!("String contains interior null bytes, cannot convert json circuit.");
@@ -97,7 +83,7 @@ pub fn Execute(&mut self, jsonCircuit: String, jsonConfig: String) -> String {
         }
     };
 
-    let c_jsonConfig_string = match CString::new(jsonConfig) {
+    let c_json_config_string = match CString::new(json_config) {
         Ok(cstr) => cstr,
         Err(_) => {
             eprintln!("String contains interior null bytes, cannot convert json config.");
@@ -106,27 +92,27 @@ pub fn Execute(&mut self, jsonCircuit: String, jsonConfig: String) -> String {
     };
 
     unsafe {
-	    let resp = SimpleExecute(self.handle, c_jsonCircuit_string.as_ptr(), c_jsonConfig_string.as_ptr());
+	    let resp = SimpleExecute(self.handle, c_json_circuit_string.as_ptr(), c_json_config_string.as_ptr());
 	    if resp.is_null() {
             eprintln!("NULL string returned as execution result.");
 	        return "".to_string();
 	    }
  
         let c_str = std::ffi::CStr::from_ptr(resp);
-	    let strRes = c_str.to_string_lossy().to_string();
+	    let str_res = c_str.to_string_lossy().to_string();
 
         FreeResult(resp);
 
-	    strRes
+	    str_res
     }
 }
 
-pub fn Estimate(&mut self, jsonCircuit: String, observableStr: String, jsonConfig: String) -> String {
+pub fn estimate(&mut self, json_circuit: String, observable_str: String, json_config: String) -> String {
     if self.handle == 0 {
 	    return "".to_string();
     } 
 
-    let c_jsonCircuit_string = match CString::new(jsonCircuit) {
+    let c_json_circuit_string = match CString::new(json_circuit) {
         Ok(cstr) => cstr,
         Err(_) => {
             eprintln!("String contains interior null bytes, cannot convert json circuit.");
@@ -134,7 +120,7 @@ pub fn Estimate(&mut self, jsonCircuit: String, observableStr: String, jsonConfi
         }
     };
 
-    let c_observable_string = match CString::new(observableStr) {
+    let c_observable_string = match CString::new(observable_str) {
         Ok(cstr) => cstr,
         Err(_) => {
             eprintln!("String contains interior null bytes, cannot convert observable string.");
@@ -143,7 +129,7 @@ pub fn Estimate(&mut self, jsonCircuit: String, observableStr: String, jsonConfi
     };
 
 
-    let c_jsonConfig_string = match CString::new(jsonConfig) {
+    let c_json_config_string = match CString::new(json_config) {
         Ok(cstr) => cstr,
         Err(_) => {
             eprintln!("String contains interior null bytes, cannot convert json config.");
@@ -152,18 +138,18 @@ pub fn Estimate(&mut self, jsonCircuit: String, observableStr: String, jsonConfi
     };
 
     unsafe {
-	    let resp = SimpleEstimate(self.handle, c_jsonCircuit_string.as_ptr(), c_observable_string.as_ptr(), c_jsonConfig_string.as_ptr());
+	    let resp = SimpleEstimate(self.handle, c_json_circuit_string.as_ptr(), c_observable_string.as_ptr(), c_json_config_string.as_ptr());
 	    if resp.is_null() {
             eprintln!("NULL string returned as estimation result.");
 	        return "".to_string();
 	    }
     
         let c_str = std::ffi::CStr::from_ptr(resp);
-	    let strRes = c_str.to_string_lossy().to_string();
+	    let str_res = c_str.to_string_lossy().to_string();
 
         FreeResult(resp);
 
-	    strRes
+	    str_res
     }
 }
 
@@ -183,16 +169,16 @@ simulatorPtr: ::std::os::raw::c_ulong,
 #[cfg(test)]
 mod tests_simulator {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     #[serial]
     fn simple_execute() {
-        //let obj = SimpleSimulator::GetMaestroObject();
 	    let mut simulator = SimpleSimulator::new(5);
-	    assert!(simulator.IsValid(), "Simulator is not valid, handle is zero");
+	    assert!(simulator.is_valid(), "Simulator is not valid, handle is zero");
 
-	    let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 1);
-        assert!(res, "RemoveAllOptimizationSimulatorsAndAdd returned false");
+	    let res = simulator.remove_all_optimization_simulators_and_add(1, 1);
+        assert!(res, "remove_all_optimization_simulators_and_add returned false");
 
         let qasm = "OPENQASM 2.0; \
             creg c[3]; \
@@ -202,12 +188,12 @@ mod tests_simulator {
             measure q[0]->c[0]; \
             measure q[1]->c[1];".to_string();
         
-        let execRes = simulator.Execute(qasm, String::new());
+        let exec_res = simulator.execute(qasm, String::new());
         simulator.destroy();
 
-        assert!(!execRes.is_empty(), "Execute returned empty string");
+        assert!(!exec_res.is_empty(), "Execute returned empty string");
 
-        let res_str: &str = &execRes;
+        let res_str: &str = &exec_res;
 
         let parsed = json::parse(res_str).unwrap();
         
@@ -225,12 +211,11 @@ mod tests_simulator {
     #[test]
     #[serial]
     fn simple_estimate() {
-        //let obj = SimpleSimulator::GetMaestroObject();
 	    let mut simulator = SimpleSimulator::new(5);
-	    assert!(simulator.IsValid(), "Simulator is not valid, handle is zero");
+	    assert!(simulator.is_valid(), "Simulator is not valid, handle is zero");
 
-	    let res = simulator.RemoveAllOptimizationSimulatorsAndAdd(1, 1);
-        assert!(res, "RemoveAllOptimizationSimulatorsAndAdd returned false");
+	    let res = simulator.remove_all_optimization_simulators_and_add(1, 1);
+        assert!(res, "remove_all_optimization_simulators_and_add returned false");
 
         let qasm = "OPENQASM 2.0; \
             creg c[3]; \
@@ -238,12 +223,12 @@ mod tests_simulator {
             x q[0]; \
             cx q[0],q[1];".to_string();
         
-        let execRes = simulator.Estimate(qasm, "zzz".to_string(), "".to_string());
+        let exec_res = simulator.estimate(qasm, "zzz;yyy;xxx".to_string(), "".to_string());
         simulator.destroy();
 
-        assert!(!execRes.is_empty(), "Estimate returned empty string");
+        assert!(!exec_res.is_empty(), "Estimate returned empty string");
 
-        let res_str: &str = &execRes;
+        let res_str: &str = &exec_res;
 
         let parsed = json::parse(res_str).unwrap();
         
@@ -252,7 +237,30 @@ mod tests_simulator {
         assert!(parsed.has_key("simulator"), "Estimate result does not have 'simulator' key");
         assert!(parsed.has_key("method"), "Estimate result does not have 'method' key");
 
+        assert!(parsed["expectation_values"].is_array(), "Estimate result expectation_values is not an array");
+
         // expectation_values is a list of floats, check if the result is meaningful!
+        let values = &parsed["expectation_values"];
+
+        let values_cnt = values.len();
+        assert!(values_cnt == 3, "Estimate result expectation_values is not 3");
+
+        let mut i = 0;
+        for value in values.members() {
+            assert!(value.is_number(), "Estimate result expectation_values contains non-number value");
+
+            if i == 0 {
+                assert!(value.as_f64().unwrap() >= 0.99999 && value.as_f64().unwrap() <= 1.00001, "Estimate result expectation_values contains value out of range [0.99999, 1.00001], Value: {}", value.as_f64().unwrap());
+            }
+            else {
+                assert!(value.as_f64().unwrap() >= -0.00001 && value.as_f64().unwrap() <= 0.00001, "Estimate result expectation_values contains value out of range [-0.00001, 0.00001], Value: {}", value.as_f64().unwrap());            
+            }
+
+            i += 1;
+        }
+
+        assert!(!values.is_empty(), "Estimate result expectation_values is empty");
+
         assert!(parsed["simulator"] == "qcsim", "Estimate result simulator is not 'qcsim'");
         assert!(parsed["method"] == "matrix_product_state", "Estimate result method is not 'matrix_product_state'");
     }
