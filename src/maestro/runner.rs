@@ -4,7 +4,9 @@ use std::thread;
 
 use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
+
 
 use crate::maestro;
 
@@ -85,6 +87,9 @@ pub struct Runner {
     tasks_queue: Mutex<VecDeque<Task>>,
     results_map: Mutex<HashMap<u64, TaskResult>>,
     stop: AtomicBool,
+    running: AtomicBool,
+    running_task_id: atomic::AtomicU32,
+    running_session_id: atomic::AtomicU32,
 }
 
 impl Runner {
@@ -100,6 +105,9 @@ pub fn new() -> Arc<Runner> {
         tasks_queue : tasks_mutex,
         results_map : results_mutex,
         stop : std::sync::atomic::AtomicBool::new(false),
+        running: std::sync::atomic::AtomicBool::new(false),
+        running_task_id: std::sync::atomic::AtomicU32::new(0),
+        running_session_id: std::sync::atomic::AtomicU32::new(0),
     };
 
     Arc::new(myself)
@@ -116,6 +124,13 @@ pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
             // Get a task from the queue
             let task_opt = {
                 let mut queue = runner.tasks_queue.lock().unwrap();
+                if queue.is_empty() {
+                    runner.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    runner.running_task_id.store(queue.front().unwrap().task_id, std::sync::atomic::Ordering::SeqCst);
+                    runner.running_session_id.store(queue.front().unwrap().session_id, std::sync::atomic::Ordering::SeqCst);
+                    runner.running.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 queue.pop_front()
             };
             
@@ -126,6 +141,8 @@ pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
                 let task_result = TaskResult::new(task.session_id, task.task_id, result);
                 let mut results = runner.results_map.lock().unwrap();
                 results.insert((task.session_id as u64) << 32 | (task.task_id as u64), task_result);
+
+                runner.running.store(false, std::sync::atomic::Ordering::SeqCst);
             } else {
                 // No tasks, sleep for a while
                 thread::sleep(std::time::Duration::from_millis(1));
@@ -158,6 +175,15 @@ pub fn get_result(&self, session_id: u32, task_id: u32) -> Option<TaskResult> {
     results.remove(&((session_id as u64) << 32 | (task_id as u64)))
 }
 
+pub fn is_running(&self, session_id: u32, task_id: u32) -> bool {
+    if self.running.load(std::sync::atomic::Ordering::SeqCst) {
+        let running_session_id = self.running_session_id.load(std::sync::atomic::Ordering::SeqCst);
+        let running_task_id = self.running_task_id.load(std::sync::atomic::Ordering::SeqCst);
+        return running_session_id == session_id && running_task_id == task_id;
+    }
+
+    false
+}
 }
 
 
