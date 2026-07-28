@@ -20,7 +20,6 @@ maintainer-scripts = "debian/scripts"
 
 [dependencies]
 signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
-serde = { version = "*", features = ["derive"] }
 json = "*"
 serial_test = { version = "*" }
 

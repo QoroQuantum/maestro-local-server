@@ -157,33 +157,35 @@ impl Session {
     }
 
     pub fn get_task_for_execution(&self, task_id : u32) -> Option<runner::Task> {
+        if let Some(task) = self.initiated_tasks.lock().unwrap().get(&task_id) {
+            if !task.is_valid() {
+                return None;
+            }
+        }
+
         let mut result : Option<runner::Task> = None;
 
-        if let Some(task) = self.initiated_tasks.lock().unwrap().get(&task_id) {
+        if let Some(task) = self.initiated_tasks.lock().unwrap().remove(&task_id){
             if task.is_valid() {
-                // remove it from the initiated tasks list
-                self.initiated_tasks.lock().unwrap().remove(&task_id);
-
-                let mut task_type = runner::TaskType::Execute;
-                if matches!(task_type, runner::TaskType::Estimate) {
-                    task_type = runner::TaskType::Estimate;
-                }
+                eprintln!("Session {}: Task {} is valid and ready for execution", self.get_id(), task_id);
 
                 result = Some(runner::Task::new(
                     self.get_id(),
                     task.task_id,
-                    task_type,
-                    task.qasm.clone(),
-                    task.observables.clone(),
+                    task.task_type,
+                    task.qasm,
+                    task.observables,
                     task.nr_qubits,
                     task.sim_type,
                     task.method,
-                    task.options.clone()
+                    task.options
                 ));
             }
         }
 
         if result.is_some() {
+            eprintln!("Adding task id {} to sent_to_runner for session {}", task_id, self.get_id());
+
             self.sent_to_runner.lock().unwrap().insert(task_id);
         }
 
@@ -207,19 +209,23 @@ impl Session {
     pub fn handle_request(&self, request: Vec<&str>, runner: Arc<runner::Runner>) -> String {
         self.reset_timer();
 
-        if request[1] == "CREATE" {
+        if request[0] == "CREATE" {
             let task_id = self.initiate_task();
             return format!("OK {}\n", task_id);
         }
+
         // extract task id
-        let task_id = request[1].parse::<u32>();
+        let task_id = request[0].parse::<u32>();
         if task_id.is_err() {
             return String::from("ERROR Invalid task ID\n");
         }
 
         let task_id = task_id.unwrap();
 
-        let task_command = request[2];
+        let task_command = request[1];
+
+        //eprintln!("Session {}: Handling task command: {} for task ID: {}", self.get_id(), task_command, task_id);
+
         match task_command {
             "EXISTS" => {
                 if self.is_task_initiated(task_id) || self.is_sent_to_runner(task_id) {
@@ -288,10 +294,10 @@ impl Session {
                 }
             },
             "SET_TYPE" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing task type\n");
                 }
-                let task_type = request[3];
+                let task_type = request[2];
                 let task_type_enum = match task_type {
                     "EXECUTE" => runner::TaskType::Execute,
                     "ESTIMATE" => runner::TaskType::Estimate,
@@ -304,10 +310,10 @@ impl Session {
                 }
             },
             "SET_QUBITS" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing number of qubits\n");
                 }
-                let nr_qubits = request[3].parse::<i32>();
+                let nr_qubits = request[2].parse::<i32>();
                 if nr_qubits.is_err() {
                     return String::from("ERROR Invalid number of qubits\n");
                 }
@@ -318,10 +324,10 @@ impl Session {
                 }
             },
             "SET_SIM_TYPE" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing simulator type\n");
                 }
-                let sim_type = request[3].parse::<i32>();
+                let sim_type = request[2].parse::<i32>();
                 if sim_type.is_err() {
                     return String::from("ERROR Invalid simulator type\n");
                 }
@@ -332,10 +338,10 @@ impl Session {
                 }
             },
             "SET_METHOD" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing method\n");
                 }
-                let method = request[3].parse::<i32>();
+                let method = request[2].parse::<i32>();
                 if method.is_err() {
                     return String::from("ERROR Invalid method\n");
                 }
@@ -346,10 +352,10 @@ impl Session {
                 }
             },
             "SET_OBSERVABLES" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing observables\n");
                 }
-                let observables = request[3..].join(" ");
+                let observables = request[2..].join(" ");
                 if self.set_task_observables(task_id, observables) {
                     return String::from("OK\n");
                 } else {
@@ -357,10 +363,10 @@ impl Session {
                 }
             },
             "SET_QASM" => {
-                if request.len() < 4 {
+                if request.len() < 3     {
                     return String::from("ERROR Missing QASM\n");
                 }
-                let qasm = request[3..].join(" ");
+                let qasm = request[2..].join(" ");
                 if self.set_task_qasm(task_id, qasm) {
                     return String::from("OK\n");
                 } else {
@@ -368,10 +374,10 @@ impl Session {
                 }
             },
             "SET_OPTIONS" => {
-                if request.len() < 4 {
+                if request.len() < 3 {
                     return String::from("ERROR Missing options\n");
                 }
-                let options = request[3..].join(" ");
+                let options = request[2..].join(" ");
                 if self.set_task_options(task_id, options) {
                     return String::from("OK\n");
                 } else {

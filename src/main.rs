@@ -64,11 +64,10 @@ mod maestro_server {
             stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
             stream.set_nonblocking(false).unwrap();
 
-            // Wrap the stream in a BufReader to read line by line
-            
             let mut message = String::new();
             
             loop {
+                message.clear();
                 let mut reader = BufReader::new(&stream);
 
                 let res = reader.read_line(&mut message);
@@ -179,9 +178,39 @@ mod server_tests {
     use super::*;
     use serial_test::serial;
 
+fn send_command_noclose(mut stream: &mut UnixStream, command: &str) -> std::io::Result<String> {
+    stream.write_all(command.as_bytes())?;
+    let mut response = String::new();
+    let mut reader = BufReader::new(&mut stream);
+    reader.read_line(&mut response)?;
+    Ok(response)
+}
+
+fn send_command_close(command: &str) -> std::io::Result<String> {
+    let socket_path = "/tmp/maestro.sock";
+    let mut stream = UnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
+    stream.set_nonblocking(false).unwrap();
+    stream.write_all(command.as_bytes())?;
+    // can close the write end now
+    stream.shutdown(std::net::Shutdown::Write).unwrap_or_else(|e| {
+            eprintln!("Failed to shutdown client stream on write: {:?}", e);
+       });
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(&mut stream);
+    reader.read_line(&mut response)?;
+    
+    stream.shutdown(std::net::Shutdown::Read).unwrap_or_else(|e| {
+            eprintln!("Failed to shutdown client stream on read: {:?}", e);
+       });
+    Ok(response)
+}
+
 #[test]
 #[serial]
-fn server_test() {
+fn server_test_nodisconnect() {
     let (session_thread, runner, runner_thread, stop_flag) = maestro_server::start(false);
 
     // let the server some time to start
@@ -205,27 +234,283 @@ fn server_test() {
 
     stream.set_nonblocking(false).unwrap();
 
-    let res = stream.write_all(b"Test message\n");
+    // SESSION stuff
+    let response = send_command_noclose(&mut stream, "SESSION 0 EXISTS\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent session, got: {}", response);
 
-    stream.shutdown(std::net::Shutdown::Write).unwrap_or_else(|e| {
-            eprintln!("Failed to shutdown client stream on write: {:?}", e);
-       });
+    let response = send_command_noclose(&mut stream, "SESSION CREATE\n").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for session creation, got: {}", response);
 
-    assert!(res.is_ok(), "Failed to write to stream");
+    let session_id = response.trim_start_matches("OK ").trim();
+    assert!(session_id == "0", "Expected session ID 0, got: {}", session_id);
 
-    let mut message = String::new();
+    let response = send_command_noclose(&mut stream, "SESSION 0 EXISTS\n").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing session, got: {}", response);
 
-    let mut reader = BufReader::new(&stream);
-    let res = reader.read_line(&mut message);
-    assert!(res.is_ok(), "Failed to read from stream");
+    let response = send_command_noclose(&mut stream, "SESSION 1 EXISTS\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non existing session, got: {}", response);
 
-    assert!(!message.is_empty(), "Received empty message from server");
+    let response = send_command_noclose(&mut stream, "SESSION 0 DELETE\n").unwrap();
+    assert!(response == "OK\n", "Expected OK for deleting existing session, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 0 EXISTS\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent session, got: {}", response);
+
+    // now create one to be used later
+
+    let response = send_command_noclose(&mut stream, "SESSION CREATE\n").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for session creation, got: {}", response);
+
+    let session_id = response.trim_start_matches("OK ").trim();
+    assert!(session_id == "1", "Expected session ID 1, got: {}", session_id);
+
+    // TASK stuff
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 EXISTS\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK CREATE\n").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for task creation, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 EXISTS\n").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 VALID\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not valid task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 PENDING\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not pending task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 RUNNING\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not running task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 FINISHED\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not finished task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 EXECUTE\n").unwrap();
+    assert!(response == "ERROR Task is not valid or does not exist\n", "Expected ERROR Task is not valid or does not exist for existing but not valid task, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 GET_RESULTS\n").unwrap();
+    assert!(response == "ERROR Result not available\n", "Expected ERROR Result not available for existing but not finished task, got: {}", response);
+
+    // now let's make the task valid by setting its values
+    // set type to EXECUTE
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 SET_TYPE EXECUTE\n").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting task type, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 SET_QUBITS 5\n").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting number of qubits, got: {}", response);
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 SET_QASM OPENQASM 2.0; creg c[3]; qreg q[3]; x q[0]; cx q[0],q[1]; measure q[0]->c[0]; measure q[1]->c[1];\n").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting qasm string, got: {}", response);
+
+    // now it should be valid
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 VALID\n").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing and valid task, got: {}", response);
+
+    // execute it
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 EXECUTE\n").unwrap();
+    assert!(response == "OK\n", "Expected OK for executing valid task, got: {}", response);
+
+    // now wait until it's finished
+    let mut finished = false;
+    while !finished {
+        let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 FINISHED\n").unwrap();
+        if response == "OK YES\n" {
+            finished = true;
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 GET_RESULTS\n").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for getting results of finished task, got: {}", response);
+
+    let json_result = response.trim_start_matches("OK ").trim();
+    
+    let parsed = json::parse(json_result).unwrap();
+        
+    assert!(parsed.has_key("counts"), "Execute result does not have 'counts' key");
+    assert!(parsed.has_key("time_taken"), "Execute result does not have 'time_taken' key");
+    assert!(parsed.has_key("simulator"), "Execute result does not have 'simulator' key");
+    assert!(parsed.has_key("method"), "Execute result does not have 'method' key");
+
+    assert!(parsed["counts"].has_key("11000"), "Execute result counts does not have '11000' key");
+    assert!(parsed["counts"]["11000"].as_i32().unwrap() == 1, "Execute result counts '11000' value is not 1");
+    assert!(parsed["simulator"] == "aer", "Execute result simulator is not 'aer'");
+    assert!(parsed["method"] == "statevector", "Execute result method is not 'statevector'");
+
+    // should not exist anymore
+    let response = send_command_noclose(&mut stream, "SESSION 1 TASK 0 EXISTS\n").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent task, got: {}", response);
 
     stream.shutdown(std::net::Shutdown::Both).unwrap_or_else(|e| {
             eprintln!("Failed to shutdown client stream on read: {:?}", e);
        });
 
     drop(stream);
+
+    stop_flag.store(false, Ordering::SeqCst);
+
+    maestro_server::stop(session_thread, runner, runner_thread);
+}
+
+
+#[test]
+#[serial]
+fn server_test_disconnect() {
+    let (session_thread, runner, runner_thread, stop_flag) = maestro_server::start(false);
+
+    // let the server some time to start
+    thread::sleep(Duration::from_millis(1500));
+
+    // wait until the path exists
+    let socket_path = "/tmp/maestro.sock";
+    // loop until the file is there
+    while !std::fs::metadata(socket_path).is_ok() {
+        thread::sleep(Duration::from_millis(100));
+    }
+    thread::sleep(Duration::from_millis(100));
+
+   
+    // SESSION stuff
+    let response = send_command_close("SESSION 0 EXISTS").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent session, got: {}", response);
+
+    let response = send_command_close("SESSION CREATE").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for session creation, got: {}", response);
+
+    let session_id = response.trim_start_matches("OK ").trim();
+    assert!(session_id == "0", "Expected session ID 0, got: {}", session_id);
+
+    let response = send_command_close("SESSION 0 EXISTS").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing session, got: {}", response);
+
+    let response = send_command_close("SESSION 1 EXISTS").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non existing session, got: {}", response);
+
+    let response = send_command_close("SESSION 0 DELETE").unwrap();
+    assert!(response == "OK\n", "Expected OK for deleting existing session, got: {}", response);
+
+    let response = send_command_close("SESSION 0 EXISTS").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent session, got: {}", response);
+
+    // now create one to be used later
+
+    let response = send_command_close("SESSION CREATE").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for session creation, got: {}", response);
+
+    let session_id = response.trim_start_matches("OK ").trim();
+    assert!(session_id == "1", "Expected session ID 1, got: {}", session_id);
+
+    // TASK stuff
+    let response = send_command_close("SESSION 1 TASK 0 EXISTS").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK CREATE").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for task creation, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 EXISTS").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 VALID").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not valid task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 PENDING").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not pending task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 RUNNING").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not running task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 FINISHED").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for existing but not finished task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 EXECUTE").unwrap();
+    assert!(response == "ERROR Task is not valid or does not exist\n", "Expected ERROR Task is not valid or does not exist for existing but not valid task, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 GET_RESULTS").unwrap();
+    assert!(response == "ERROR Result not available\n", "Expected ERROR Result not available for existing but not finished task, got: {}", response);
+
+    // now let's make the task valid by setting its values
+    // set type to ESTIMATE
+    let response = send_command_close("SESSION 1 TASK 0 SET_TYPE ESTIMATE").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting task type, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 SET_QUBITS 5").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting number of qubits, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 SET_SIM_TYPE 1").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting simulator type, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 SET_METHOD 1").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting method, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 SET_QASM OPENQASM 2.0; creg c[3]; qreg q[3]; x q[0]; cx q[0],q[1];").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting qasm string, got: {}", response);
+
+    let response = send_command_close("SESSION 1 TASK 0 SET_OBSERVABLES zzz;yyy;xxx").unwrap();
+    assert!(response == "OK\n", "Expected OK for setting observables, got: {}", response);
+
+    // now it should be valid
+    let response = send_command_close("SESSION 1 TASK 0 VALID").unwrap();
+    assert!(response == "OK YES\n", "Expected OK YES for existing and valid task, got: {}", response);
+
+    // execute it
+    let response = send_command_close("SESSION 1 TASK 0 EXECUTE").unwrap();
+    assert!(response == "OK\n", "Expected OK for executing valid task, got: {}", response);
+
+    // now wait until it's finished
+    let mut finished = false;
+    while !finished {
+        let response = send_command_close("SESSION 1 TASK 0 FINISHED").unwrap();
+        if response == "OK YES\n" {
+            finished = true;
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let response = send_command_close("SESSION 1 TASK 0 GET_RESULTS").unwrap();
+    assert!(response.starts_with("OK "), "Expected OK for getting results of finished task, got: {}", response);
+
+    let json_result = response.trim_start_matches("OK ").trim();
+    
+    let parsed = json::parse(json_result).unwrap();
+        
+    assert!(parsed.has_key("expectation_values"), "Estimate result does not have 'expectation_values' key");
+    assert!(parsed.has_key("time_taken"), "Estimate result does not have 'time_taken' key");
+    assert!(parsed.has_key("simulator"), "Estimate result does not have 'simulator' key");
+    assert!(parsed.has_key("method"), "Estimate result does not have 'method' key");
+
+    assert!(parsed["expectation_values"].is_array(), "Estimate result expectation_values is not an array");
+
+    // expectation_values is a list of floats, check if the result is meaningful!
+    let values = &parsed["expectation_values"];
+
+    let values_cnt = values.len();
+    assert!(values_cnt == 3, "Estimate result expectation_values is not 3");
+
+    let mut i = 0;
+    for value in values.members() {
+        assert!(value.is_number(), "Estimate result expectation_values contains non-number value");
+
+        if i == 0 {
+            assert!(value.as_f64().unwrap() >= 0.99999 && value.as_f64().unwrap() <= 1.00001, "Estimate result expectation_values contains value out of range [0.99999, 1.00001], Value: {}", value.as_f64().unwrap());
+        }
+        else {
+            assert!(value.as_f64().unwrap() >= -0.00001 && value.as_f64().unwrap() <= 0.00001, "Estimate result expectation_values contains value out of range [-0.00001, 0.00001], Value: {}", value.as_f64().unwrap());            
+        }
+
+        i += 1;
+    }
+
+    assert!(!values.is_empty(), "Estimate result expectation_values is empty");
+
+    assert!(parsed["simulator"] == "qcsim", "Estimate result simulator is not 'qcsim'");
+    assert!(parsed["method"] == "matrix_product_state", "Estimate result method is not 'matrix_product_state'");
+
+    // should not exist anymore
+    let response = send_command_close("SESSION 1 TASK 0 EXISTS").unwrap();
+    assert!(response == "OK NO\n", "Expected OK NO for non-existent task, got: {}", response);
 
     stop_flag.store(false, Ordering::SeqCst);
 
