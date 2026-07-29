@@ -5,7 +5,7 @@ deb-systemd-helper unmask maestro.service > /dev/null || true
 if deb-systemd-helper --quiet was-enabled maestro.service
 then
     deb-systemd-helper enable maestro.service > /dev/null || true
-    deb-systemd-invoke start maestro-local-server
+    deb-systemd-invoke start maestro.service
 else
     deb-systemd-helper update-state maestro.service > /dev/null || true
 fi

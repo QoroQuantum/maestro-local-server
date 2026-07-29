@@ -12,13 +12,13 @@ use std::{
 
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::io::{Write, BufReader, BufRead};
-
+use std::os::unix::fs::PermissionsExt;
 
 mod maestro_server {
     use super::*;
 
     fn server(session_manager: Arc<maestro::sessions::SessionManager>, runner: Arc<maestro::runner::Runner>, running: Arc<AtomicBool>) -> std::io::Result<()> {
-        let socket_path = "/tmp/maestro.sock";
+        let socket_path = "/run/maestro.sock";
 
         if std::fs::metadata(socket_path).is_ok() {
             println!("A socket is already present. Deleting...");
@@ -26,6 +26,11 @@ mod maestro_server {
         }
 
         let listener = UnixListener::bind(socket_path)?;
+        // Grant read/write permissions to the group
+        let mut perms = std::fs::metadata(socket_path)?.permissions();
+        perms.set_mode(0o660); // 0o660 = rw-rw----
+        std::fs::set_permissions(socket_path, perms)?;
+
         listener.set_nonblocking(true)?; // So accept() won't block forever
         println!("Server is listening...");
 
@@ -187,7 +192,7 @@ fn send_command_noclose(mut stream: &mut UnixStream, command: &str) -> std::io::
 }
 
 fn send_command_close(command: &str) -> std::io::Result<String> {
-    let socket_path = "/tmp/maestro.sock";
+    let socket_path = "/run/maestro.sock";
     let mut stream = UnixStream::connect(socket_path)?;
     stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
     stream.set_write_timeout(Some(Duration::from_secs(15))).unwrap();
@@ -217,7 +222,7 @@ fn server_test_nodisconnect() {
     thread::sleep(Duration::from_millis(1500));
 
     // wait until the path exists
-    let socket_path = "/tmp/maestro.sock";
+    let socket_path = "/run/maestro.sock";
     // loop until the file is there
     while !std::fs::metadata(socket_path).is_ok() {
         thread::sleep(Duration::from_millis(100));
@@ -364,7 +369,7 @@ fn server_test_disconnect() {
     thread::sleep(Duration::from_millis(1500));
 
     // wait until the path exists
-    let socket_path = "/tmp/maestro.sock";
+    let socket_path = "/run/maestro.sock";
     // loop until the file is there
     while !std::fs::metadata(socket_path).is_ok() {
         thread::sleep(Duration::from_millis(100));

@@ -7,7 +7,9 @@ ExecStart=/usr/bin/maestro-local-server
 Restart=always
 PrivateTmp=true
 NoNewPrivileges=true
+RuntimeDirectoryMode=0770
+Group=users
 
 [Install]
-Alias=maestro-local-server
+Alias=maestro.service
 WantedBy=default.target
