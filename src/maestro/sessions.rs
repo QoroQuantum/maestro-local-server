@@ -200,6 +200,13 @@ impl Session {
         self.sent_to_runner.lock().unwrap().contains(&task_id)
     }
 
+    fn remove_tasks(&self, runner: Arc<runner::Runner>) {
+        // walk over sent_to_runner and remove tasks from runner
+        for task_id in self.sent_to_runner.lock().unwrap().iter() {
+            runner.remove_task(self.get_id(), *task_id);
+        }
+    }
+
     // SESSION <session_id> TASK ... commands
     // only what's following TASK in the command is present in request
     // CREATE
@@ -417,11 +424,17 @@ impl SessionManager {
         self.sessions.lock().unwrap().contains_key(&session_id)
     }
     
-    pub fn remove_session(&self, session_id : u32) {
+    pub fn remove_session(&self, session_id : u32, runner: Arc<runner::Runner>) {
+        let session = self.get_session(session_id);
+
         self.sessions.lock().unwrap().remove(&session_id);
+
+        if let Some(session) = session {
+            session.remove_tasks(runner);
+        }
     }
     
-    pub fn tick_sessions(&self) {
+    pub fn tick_sessions(&self, runner: Arc<runner::Runner>) {
         let time_limit = self.time_limit.load(std::sync::atomic::Ordering::SeqCst);
         let mut sessions_to_remove = Vec::new();
         for (session_id, session) in self.sessions.lock().unwrap().iter() {
@@ -431,7 +444,7 @@ impl SessionManager {
             }
         }
         for session_id in sessions_to_remove {
-            self.remove_session(session_id);
+            self.remove_session(session_id, Arc::clone(&runner));
         }
     }
 
@@ -457,9 +470,10 @@ impl SessionManager {
             }
 
             let session_id = session_id.unwrap();
+
             if parts[1] == "DELETE" {
                 if self.session_exists(session_id) {
-                    self.remove_session(session_id);
+                    self.remove_session(session_id, runner);
                     return String::from("OK\n");
                 } else {
                     return String::from("ERROR Session does not exist\n");

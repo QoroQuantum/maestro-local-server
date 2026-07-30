@@ -114,6 +114,7 @@ pub fn new() -> Arc<Runner> {
 }
 
 pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
+    // TODO: add the posibility to cancel a running task (should be done when the session is closed/deleted)
     let the_thread = thread::spawn(move || {
         loop {
             // Check if we need to stop
@@ -184,6 +185,19 @@ pub fn is_running(&self, session_id: u32, task_id: u32) -> bool {
 
     false
 }
+
+pub fn remove_task(&self, session_id: u32, task_id: u32) {
+    let mut queue = self.tasks_queue.lock().unwrap();
+    queue.retain(|task| !(task.session_id == session_id && task.task_id == task_id));
+
+    // TODO: also stop and remove the task if it's currently running. 
+    // This is a bit more complicated, as we need to signal the running task to stop. For now, we just remove it from the queue.
+
+    // this is usually called when a session is closed, so we should also remove the result if it exists
+    let mut results = self.results_map.lock().unwrap();
+    results.remove(&((session_id as u64) << 32 | (task_id as u64)));
+}
+
 }
 
 
