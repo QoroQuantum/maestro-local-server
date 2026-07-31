@@ -167,8 +167,6 @@ impl Session {
 
         if let Some(task) = self.initiated_tasks.lock().unwrap().remove(&task_id){
             if task.is_valid() {
-                eprintln!("Session {}: Task {} is valid and ready for execution", self.get_id(), task_id);
-
                 result = Some(runner::Task::new(
                     self.get_id(),
                     task.task_id,
@@ -184,8 +182,6 @@ impl Session {
         }
 
         if result.is_some() {
-            eprintln!("Adding task id {} to sent_to_runner for session {}", task_id, self.get_id());
-
             self.sent_to_runner.lock().unwrap().insert(task_id);
         }
 
