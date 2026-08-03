@@ -15,14 +15,14 @@ fn main() {
     // to bindgen, and lets you build up options for
     // the resulting bindings.
     let bindings = bindgen::Builder::default()
-	// clang args, we use c++17, although we expose C api
-	.clang_args(["-x","c++", "-std=c++17"].iter())
+        // clang args, we use c++17, although we expose C api
+        .clang_args(["-x", "c++", "-std=c++17"].iter())
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
-	.parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Finish the builder and generate the bindings.
         .generate()
         .expect("Unable to generate bindings");
