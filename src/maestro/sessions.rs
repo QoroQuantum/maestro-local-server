@@ -164,28 +164,28 @@ impl Session {
     }
 
     pub fn get_task_for_execution(&self, task_id: u32) -> Option<runner::Task> {
-        if let Some(task) = self.initiated_tasks.lock().unwrap().get(&task_id) {
-            if !task.is_valid() {
-                return None;
-            }
+        if let Some(task) = self.initiated_tasks.lock().unwrap().get(&task_id)
+            && !task.is_valid()
+        {
+            return None;
         }
 
         let mut result: Option<runner::Task> = None;
 
-        if let Some(task) = self.initiated_tasks.lock().unwrap().remove(&task_id) {
-            if task.is_valid() {
-                result = Some(runner::Task::new(
-                    self.get_id(),
-                    task.task_id,
-                    task.task_type,
-                    task.qasm,
-                    task.observables,
-                    task.nr_qubits,
-                    task.sim_type,
-                    task.method,
-                    task.options,
-                ));
-            }
+        if let Some(task) = self.initiated_tasks.lock().unwrap().remove(&task_id)
+            && task.is_valid()
+        {
+            result = Some(runner::Task::new(
+                self.get_id(),
+                task.task_id,
+                task.task_type,
+                task.qasm,
+                task.observables,
+                task.nr_qubits,
+                task.sim_type,
+                task.method,
+                task.options,
+            ));
         }
 
         if result.is_some() {
@@ -426,7 +426,7 @@ impl SessionManager {
             .lock()
             .unwrap()
             .get(&session_id)
-            .map(|s| Arc::clone(s))
+            .map(Arc::clone)
     }
 
     pub fn session_exists(&self, session_id: u32) -> bool {
@@ -464,7 +464,7 @@ impl SessionManager {
     pub fn handle_request(&self, request: String, runner: Arc<runner::Runner>) -> String {
         if request.starts_with("CREATE") {
             let session_id = self.create_session();
-            return format!("OK {}\n", session_id);
+            format!("OK {}\n", session_id)
         } else {
             // extract all chars up to whitespace as session_id
             let parts: Vec<&str> = request.split_whitespace().collect();
@@ -498,12 +498,12 @@ impl SessionManager {
             if self.session_exists(session_id) {
                 if parts[1] == "TASK" && parts.len() >= 3 {
                     let session = self.get_session(session_id).unwrap();
-                    return session.handle_request(parts[2..].to_vec(), runner);
+                    session.handle_request(parts[2..].to_vec(), runner)
                 } else {
-                    return String::from("ERROR Unknown command\n");
+                    String::from("ERROR Unknown command\n")
                 }
             } else {
-                return String::from("ERROR Unknown session\n");
+                String::from("ERROR Unknown session\n")
             }
         }
     }

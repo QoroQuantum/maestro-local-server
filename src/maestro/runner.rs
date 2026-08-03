@@ -29,6 +29,7 @@ pub struct Task {
 }
 
 impl Task {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: u32,
         task_id: u32,
@@ -121,7 +122,7 @@ impl Runner {
 
     pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
         // TODO: add the posibility to cancel a running task (should be done when the session is closed/deleted)
-        let the_thread = thread::spawn(move || {
+        thread::spawn(move || {
             loop {
                 // Check if we need to stop
                 if runner.stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -172,9 +173,7 @@ impl Runner {
             }
 
             0
-        });
-
-        the_thread
+        })
     }
 
     pub fn stop(&self) {

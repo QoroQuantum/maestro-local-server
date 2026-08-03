@@ -109,9 +109,7 @@ mod maestro_server {
 
                 let response;
 
-                if message.starts_with("SESSION ") {
-                    let substring = &message[8..];
-
+                if let Some(substring) = message.strip_prefix("SESSION ") {
                     response =
                         session_manager.handle_request(substring.to_string(), Arc::clone(&runner));
                 } else {
@@ -156,10 +154,10 @@ mod maestro_server {
 
         // Spawn a dedicated thread to wait for OS termination signals (SIGINT/SIGTERM)
         thread::spawn(move || {
-            for signal in signals.forever() {
+            if let Some(signal) = signals.forever().next() {
                 println!("Received termination signal: {}", signal);
                 r_signal_clone.store(false, Ordering::SeqCst);
-                break; // Stop listening and allow the thread to exit
+                // Stop listening and allow the thread to exit
             }
         });
 
@@ -908,8 +906,7 @@ mod server_tests {
             "Estimate result expectation_values is not 3"
         );
 
-        let mut i = 0;
-        for value in values.members() {
+        for (i, value) in values.members().enumerate() {
             assert!(
                 value.is_number(),
                 "Estimate result expectation_values contains non-number value"
@@ -928,8 +925,6 @@ mod server_tests {
                     value.as_f64().unwrap()
                 );
             }
-
-            i += 1;
         }
 
         assert!(

@@ -13,7 +13,7 @@ impl SimpleSimulator {
         unsafe {
             let obj = GetMaestroObjectWithMute();
 
-            if obj == std::ptr::null_mut() {
+            if obj.is_null() {
                 eprintln!("Failed to get Maestro object.");
             }
 
@@ -306,8 +306,7 @@ mod tests_simulator {
             "Estimate result expectation_values is not 3"
         );
 
-        let mut i = 0;
-        for value in values.members() {
+        for (i, value) in values.members().enumerate() {
             assert!(
                 value.is_number(),
                 "Estimate result expectation_values contains non-number value"
@@ -326,8 +325,6 @@ mod tests_simulator {
                     value.as_f64().unwrap()
                 );
             }
-
-            i += 1;
         }
 
         assert!(
