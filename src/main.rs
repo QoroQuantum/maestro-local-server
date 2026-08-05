@@ -112,6 +112,8 @@ mod maestro_server {
                 if let Some(substring) = message.strip_prefix("SESSION ") {
                     response =
                         session_manager.handle_request(substring.to_string(), Arc::clone(&runner));
+                } else if message == "PING" || message == "PING\n" {
+                    response = String::from("OK\n");
                 } else {
                     response = String::from("ERROR Unknown command\n");
                 }

@@ -210,6 +210,26 @@ impl Session {
         }
     }
 
+    pub fn cancel_task(&self, runner: Arc<runner::Runner>, task_id: u32) -> bool {
+        if self.is_sent_to_runner(task_id) || runner.is_running(self.get_id(), task_id) {
+            runner.remove_task(self.get_id(), task_id);
+            self.execution_finished(task_id);
+            return true;
+        } else {
+            // might be in 'initiated_tasks' but not yet sent to runner, so remove it from there
+            if self
+                .initiated_tasks
+                .lock()
+                .unwrap()
+                .remove(&task_id)
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     // SESSION <session_id> TASK ... commands
     // only what's following TASK in the command is present in request
     // CREATE
@@ -239,6 +259,13 @@ impl Session {
         match task_command {
             "EXISTS" => {
                 if self.is_task_initiated(task_id) || self.is_sent_to_runner(task_id) {
+                    return String::from("OK YES\n");
+                } else {
+                    return String::from("OK NO\n");
+                }
+            }
+            "CANCEL" => {
+                if self.cancel_task(runner, task_id) {
                     return String::from("OK YES\n");
                 } else {
                     return String::from("OK NO\n");
