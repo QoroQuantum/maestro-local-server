@@ -292,10 +292,11 @@ mod tests_runner {
         assert!(!runner.is_task_result_failed(2, 1));
 
         // an empty result signals a failure
-        runner.results_map.lock().unwrap().insert(
-            (2u64 << 32) | 1u64,
-            TaskResult::new(2, 1, "".to_string()),
-        );
+        runner
+            .results_map
+            .lock()
+            .unwrap()
+            .insert((2u64 << 32) | 1u64, TaskResult::new(2, 1, "".to_string()));
         assert!(runner.is_task_result_available(2, 1));
         assert!(runner.is_task_result_failed(2, 1));
 
