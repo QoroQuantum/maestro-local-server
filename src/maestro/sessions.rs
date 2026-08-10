@@ -233,7 +233,7 @@ impl Session {
     // SESSION <session_id> TASK ... commands
     // only what's following TASK in the command is present in request
     // CREATE
-    // an id followed by EXISTS, VALID, PENDING, RUNNING, FINISHED, EXECUTE, GET_RESULTS, SET_TYPE, SET_QUBITS, SET_SIM_TYPE, SET_METHOD, SET_OBSERVABLES, SET_QASM, SET_OPTIONS
+    // an id followed by EXISTS, VALID, PENDING, RUNNING, FINISHED, FAILED, EXECUTE, GET_RESULTS, SET_TYPE, SET_QUBITS, SET_SIM_TYPE, SET_METHOD, SET_OBSERVABLES, SET_QASM, SET_OPTIONS
     // NOTE: After GET_RESULTS the task will be removed
 
     pub fn handle_request(&self, request: Vec<&str>, runner: Arc<runner::Runner>) -> String {
@@ -302,6 +302,13 @@ impl Session {
             }
             "FINISHED" => {
                 if runner.is_task_result_available(self.get_id(), task_id) {
+                    return String::from("OK YES\n");
+                } else {
+                    return String::from("OK NO\n");
+                }
+            }
+            "FAILED" => {
+                if runner.is_task_result_failed(self.get_id(), task_id) {
                     return String::from("OK YES\n");
                 } else {
                     return String::from("OK NO\n");

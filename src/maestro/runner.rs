@@ -190,6 +190,13 @@ impl Runner {
         results.contains_key(&((session_id as u64) << 32 | (task_id as u64)))
     }
 
+    pub fn is_task_result_failed(&self, session_id: u32, task_id: u32) -> bool {
+        let results = self.results_map.lock().unwrap();
+        results
+            .get(&((session_id as u64) << 32 | (task_id as u64)))
+            .is_some_and(|result| result.result.is_empty())
+    }
+
     pub fn get_result(&self, session_id: u32, task_id: u32) -> Option<TaskResult> {
         let mut results = self.results_map.lock().unwrap();
 
@@ -273,5 +280,31 @@ mod tests_runner {
         // Stop the runner
         runner.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         handle.join().unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn is_task_result_failed_test() {
+        let runner = Runner::new();
+
+        // no result yet: neither available nor failed
+        assert!(!runner.is_task_result_available(2, 1));
+        assert!(!runner.is_task_result_failed(2, 1));
+
+        // an empty result signals a failure
+        runner.results_map.lock().unwrap().insert(
+            (2u64 << 32) | 1u64,
+            TaskResult::new(2, 1, "".to_string()),
+        );
+        assert!(runner.is_task_result_available(2, 1));
+        assert!(runner.is_task_result_failed(2, 1));
+
+        // a non-empty result is not a failure
+        runner.results_map.lock().unwrap().insert(
+            (2u64 << 32) | 2u64,
+            TaskResult::new(2, 2, "{\"counts\": {}}".to_string()),
+        );
+        assert!(runner.is_task_result_available(2, 2));
+        assert!(!runner.is_task_result_failed(2, 2));
     }
 }

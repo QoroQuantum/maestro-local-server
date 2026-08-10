@@ -456,6 +456,17 @@ mod server_tests {
 
         let response = send_command_noclose(
             &mut stream,
+            &format!("SESSION {} TASK 0 FAILED\n", session_id),
+        )
+        .unwrap();
+        assert!(
+            response == "OK NO\n",
+            "Expected OK NO for existing but not finished task, got: {}",
+            response
+        );
+
+        let response = send_command_noclose(
+            &mut stream,
             &format!("SESSION {} TASK 0 EXECUTE\n", session_id),
         )
         .unwrap();
@@ -545,6 +556,18 @@ mod server_tests {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+
+        // it finished successfully, so it should not be reported as failed
+        let response = send_command_noclose(
+            &mut stream,
+            &format!("SESSION {} TASK 0 FAILED\n", session_id),
+        )
+        .unwrap();
+        assert!(
+            response == "OK NO\n",
+            "Expected OK NO for successfully finished task, got: {}",
+            response
+        );
 
         let response = send_command_noclose(
             &mut stream,
@@ -764,6 +787,14 @@ mod server_tests {
         );
 
         let response =
+            send_command_close(&format!("SESSION {} TASK 0 FAILED", session_id)).unwrap();
+        assert!(
+            response == "OK NO\n",
+            "Expected OK NO for existing but not finished task, got: {}",
+            response
+        );
+
+        let response =
             send_command_close(&format!("SESSION {} TASK 0 EXECUTE", session_id)).unwrap();
         assert!(
             response == "ERROR Task is not valid or does not exist\n",
@@ -864,6 +895,15 @@ mod server_tests {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+
+        // it finished successfully, so it should not be reported as failed
+        let response =
+            send_command_close(&format!("SESSION {} TASK 0 FAILED", session_id)).unwrap();
+        assert!(
+            response == "OK NO\n",
+            "Expected OK NO for successfully finished task, got: {}",
+            response
+        );
 
         let response =
             send_command_close(&format!("SESSION {} TASK 0 GET_RESULTS", session_id)).unwrap();
