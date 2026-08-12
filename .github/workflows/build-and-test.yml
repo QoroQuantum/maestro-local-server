@@ -77,14 +77,15 @@ jobs:
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         run: cmake --build build -j$(nproc)
 
-      # libmaestro.so installs to /usr/local (not /usr/local/lib), which
-      # ubuntu-latest runners don't scan by default, so the dynamic linker
-      # needs to be told about it explicitly.
+      # libmaestro.so installs to /usr/local (not /usr/local/lib), and it in
+      # turn links against the self-contained Boost build below - neither is
+      # on the ubuntu-latest runner's default linker search path, so the
+      # dynamic linker needs to be told about both explicitly.
       - name: Install Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         run: |
           sudo cmake --install build
-          echo "/usr/local" | sudo tee /etc/ld.so.conf.d/maestro.conf
+          printf '/usr/local\n%s/lib\n' "${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}" | sudo tee /etc/ld.so.conf.d/maestro.conf
           sudo ldconfig
 
       - name: Install Rust toolchain
