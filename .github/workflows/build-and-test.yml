@@ -44,22 +44,27 @@ jobs:
         if: steps.cache-aer.outputs.cache-hit != 'true'
         run: git clone --depth 1 https://github.com/InvictusWingsSRL/qiskit-aer.git "${{ steps.paths.outputs.maestro_dir }}/qiskit-aer"
 
+      # Installed straight into /usr/local (a standard search path) rather
+      # than a self-contained prefix, so no extra linker configuration is
+      # needed for Boost's shared libraries at test-run time.
       - name: Cache Boost
         id: cache-boost
         uses: actions/cache@v4
         with:
-          path: ${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}
+          path: |
+            /usr/local/include/boost
+            /usr/local/lib/libboost*
           key: ${{ runner.os }}-boost-${{ env.BOOST_VERSION }}
 
       - name: Build Boost
         if: steps.cache-boost.outputs.cache-hit != 'true'
-        working-directory: ${{ steps.paths.outputs.maestro_dir }}
+        working-directory: ${{ runner.temp }}
         run: |
           curl -L https://archives.boost.io/release/${{ env.BOOST_VERSION }}/source/${{ steps.paths.outputs.boost_dir }}.tar.gz --output boost.tgz
-          tar -xzf boost.tgz && rm boost.tgz
+          tar -xzf boost.tgz
           cd ${{ steps.paths.outputs.boost_dir }}
-          ./bootstrap.sh --prefix=.
-          ./b2 -j$(nproc) --with-program_options --with-json --with-container --with-serialization install
+          ./bootstrap.sh --prefix=/usr/local
+          sudo ./b2 -j$(nproc) --with-program_options --with-json --with-container --with-serialization install
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -75,7 +80,7 @@ jobs:
       - name: Configure Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         env:
-          BOOST_ROOT: ${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}
+          BOOST_ROOT: /usr/local
           AER_INCLUDE_DIR: ${{ steps.paths.outputs.maestro_dir }}/qiskit-aer/src
         run: |
           cmake -S . -B build -G Ninja \
@@ -89,15 +94,14 @@ jobs:
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         run: cmake --build build -j$(nproc)
 
-      # libmaestro.so installs to /usr/local (not /usr/local/lib), and it in
-      # turn links against the self-contained Boost build below - neither is
-      # on the ubuntu-latest runner's default linker search path, so the
-      # dynamic linker needs to be told about both explicitly.
+      # libmaestro.so installs directly to /usr/local (not /usr/local/lib),
+      # which ubuntu-latest runners don't scan by default, so the dynamic
+      # linker needs to be told about it explicitly.
       - name: Install Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         run: |
           sudo cmake --install build
-          printf '/usr/local\n%s/lib\n' "${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}" | sudo tee /etc/ld.so.conf.d/maestro.conf
+          echo "/usr/local" | sudo tee /etc/ld.so.conf.d/maestro.conf
           sudo ldconfig
 
       - name: Install Rust toolchain
