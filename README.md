@@ -1,5 +1,7 @@
 # maestro-local-server
 
+[![Build and Test](https://github.com/QoroQuantum/maestro-local-server/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/QoroQuantum/maestro-local-server/actions/workflows/build-and-test.yml)
+
 A local daemon that exposes [Maestro](https://github.com/QoroQuantum/maestro) quantum circuit
 simulation over a Unix domain socket. Clients connect to the socket and issue simple
 line-based text commands to create sessions, submit simulation tasks (circuit execution or
