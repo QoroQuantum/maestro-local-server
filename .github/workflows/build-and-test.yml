@@ -90,9 +90,14 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache
 
+      # This repo is private, so it runs on the small 2-core/7GB
+      # ubuntu-latest runner rather than the 4-core/16GB one public repos
+      # get. Qiskit Aer's heavily templated C++ can use several GB per
+      # translation unit, so -j$(nproc) here risks OOMing even at 2 jobs;
+      # capping at -j1 trades build time for staying within memory.
       - name: Build Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
-        run: cmake --build build -j$(nproc)
+        run: cmake --build build -j1
 
       # libmaestro.so installs directly to /usr/local (not /usr/local/lib),
       # which ubuntu-latest runners don't scan by default, so the dynamic
