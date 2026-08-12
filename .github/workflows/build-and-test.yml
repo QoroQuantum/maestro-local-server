@@ -31,7 +31,18 @@ jobs:
         run: git clone --depth 1 https://github.com/QoroQuantum/maestro.git "${{ steps.paths.outputs.maestro_dir }}"
 
       - name: Install system build tools
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build ccache libclang-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build ccache libclang-dev libopenblas-dev
+
+      - name: Cache Qiskit Aer checkout
+        id: cache-aer
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.paths.outputs.maestro_dir }}/qiskit-aer
+          key: ${{ runner.os }}-qiskit-aer-v1
+
+      - name: Checkout Qiskit Aer
+        if: steps.cache-aer.outputs.cache-hit != 'true'
+        run: git clone --depth 1 https://github.com/InvictusWingsSRL/qiskit-aer.git "${{ steps.paths.outputs.maestro_dir }}/qiskit-aer"
 
       - name: Cache Boost
         id: cache-boost
@@ -58,13 +69,14 @@ jobs:
           restore-keys: |
             ccache-maestro-${{ runner.os }}-
 
-      # AER_INCLUDE_DIR is intentionally left unset: Maestro's CMake build
-      # disables the (optional) Qiskit Aer backend when it's absent, which
-      # skips the heavy BLAS/qiskit-aer setup and is all this crate needs.
+      # AER_INCLUDE_DIR enables Maestro's Qiskit Aer backend, which the test
+      # suite relies on for backend-selection assertions (e.g. tests expect
+      # the "aer"/"statevector" combo to be picked for certain circuits).
       - name: Configure Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         env:
           BOOST_ROOT: ${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}
+          AER_INCLUDE_DIR: ${{ steps.paths.outputs.maestro_dir }}/qiskit-aer/src
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
