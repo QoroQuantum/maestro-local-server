@@ -1,0 +1,96 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  BOOST_VERSION: 1.90.0
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout maestro-local-server
+        uses: actions/checkout@v5
+
+      # build.rs / wrapper.h expect the Maestro C++ library to live at
+      # ../../maestro relative to this crate's root, so it's cloned as a
+      # sibling checkout two directories above the workspace.
+      - name: Resolve Maestro checkout path
+        id: paths
+        run: |
+          MAESTRO_DIR="$(cd "$GITHUB_WORKSPACE/../.." && pwd)/maestro"
+          echo "maestro_dir=$MAESTRO_DIR" >> "$GITHUB_OUTPUT"
+          echo "boost_dir=boost_$(echo ${{ env.BOOST_VERSION }} | tr . _)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Maestro C++ library
+        run: git clone --depth 1 https://github.com/QoroQuantum/maestro.git "${{ steps.paths.outputs.maestro_dir }}"
+
+      - name: Install system build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build ccache libclang-dev
+
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}
+          key: ${{ runner.os }}-boost-${{ env.BOOST_VERSION }}
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        working-directory: ${{ steps.paths.outputs.maestro_dir }}
+        run: |
+          curl -L https://archives.boost.io/release/${{ env.BOOST_VERSION }}/source/${{ steps.paths.outputs.boost_dir }}.tar.gz --output boost.tgz
+          tar -xzf boost.tgz && rm boost.tgz
+          cd ${{ steps.paths.outputs.boost_dir }}
+          ./bootstrap.sh --prefix=.
+          ./b2 -j$(nproc) --with-program_options --with-json --with-container --with-serialization install
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-maestro-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-maestro-${{ runner.os }}-
+
+      # AER_INCLUDE_DIR is intentionally left unset: Maestro's CMake build
+      # disables the (optional) Qiskit Aer backend when it's absent, which
+      # skips the heavy BLAS/qiskit-aer setup and is all this crate needs.
+      - name: Configure Maestro
+        working-directory: ${{ steps.paths.outputs.maestro_dir }}
+        env:
+          BOOST_ROOT: ${{ steps.paths.outputs.maestro_dir }}/${{ steps.paths.outputs.boost_dir }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_PYTHON_BINDINGS=OFF \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
+
+      - name: Build Maestro
+        working-directory: ${{ steps.paths.outputs.maestro_dir }}
+        run: cmake --build build -j$(nproc)
+
+      - name: Install Maestro
+        working-directory: ${{ steps.paths.outputs.maestro_dir }}
+        run: |
+          sudo cmake --install build
+          sudo ldconfig
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Test
+        run: cargo test --verbose
