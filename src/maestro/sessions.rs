@@ -163,36 +163,34 @@ impl Session {
         false
     }
 
-    pub fn get_task_for_execution(&self, task_id: u32) -> Option<runner::Task> {
-        if let Some(task) = self.initiated_tasks.lock().unwrap().get(&task_id)
-            && !task.is_valid()
-        {
-            return None;
+    fn enqueue_task(&self, runner: &runner::Runner, task_id: u32) -> bool {
+        // Hold sent_to_runner through queue insertion to serialize submission
+        // with cancellation. When both session locks are needed, take this one first.
+        let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
+        let mut initiated_tasks = self.initiated_tasks.lock().unwrap();
+
+        let Some(task) = initiated_tasks.get(&task_id) else {
+            return false;
+        };
+        if !task.is_valid() {
+            return false;
         }
 
-        let mut result: Option<runner::Task> = None;
+        let task = initiated_tasks.remove(&task_id).unwrap();
+        sent_to_runner.insert(task_id);
+        runner.add_task(runner::Task::new(
+            self.get_id(),
+            task.task_id,
+            task.task_type,
+            task.qasm,
+            task.observables,
+            task.nr_qubits,
+            task.sim_type,
+            task.method,
+            task.options,
+        ));
 
-        if let Some(task) = self.initiated_tasks.lock().unwrap().remove(&task_id)
-            && task.is_valid()
-        {
-            result = Some(runner::Task::new(
-                self.get_id(),
-                task.task_id,
-                task.task_type,
-                task.qasm,
-                task.observables,
-                task.nr_qubits,
-                task.sim_type,
-                task.method,
-                task.options,
-            ));
-        }
-
-        if result.is_some() {
-            self.sent_to_runner.lock().unwrap().insert(task_id);
-        }
-
-        result
+        true
     }
 
     pub fn execution_finished(&self, task_id: u32) {
@@ -211,23 +209,19 @@ impl Session {
     }
 
     pub fn cancel_task(&self, runner: Arc<runner::Runner>, task_id: u32) -> bool {
-        if self.is_sent_to_runner(task_id) || runner.is_running(self.get_id(), task_id) {
+        let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
+        if sent_to_runner.contains(&task_id) || runner.is_running(self.get_id(), task_id) {
             runner.remove_task(self.get_id(), task_id);
-            self.execution_finished(task_id);
-            return true;
+            sent_to_runner.remove(&task_id);
+            true
         } else {
             // might be in 'initiated_tasks' but not yet sent to runner, so remove it from there
-            if self
-                .initiated_tasks
+            self.initiated_tasks
                 .lock()
                 .unwrap()
                 .remove(&task_id)
                 .is_some()
-            {
-                return true;
-            }
         }
-        false
     }
 
     // SESSION <session_id> TASK ... commands
@@ -315,9 +309,7 @@ impl Session {
                 }
             }
             "EXECUTE" => {
-                if let Some(task) = self.get_task_for_execution(task_id) {
-                    // send the task to the runner
-                    runner.add_task(task);
+                if self.enqueue_task(&runner, task_id) {
                     return String::from("OK\n");
                 } else {
                     return String::from("ERROR Task is not valid or does not exist\n");

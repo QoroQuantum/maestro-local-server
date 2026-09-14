@@ -233,7 +233,89 @@ impl Runner {
 #[cfg(test)]
 mod tests_runner {
     use super::*;
+    use crate::maestro::sessions::Session;
     use serial_test::serial;
+    use std::sync::Barrier;
+
+    #[test]
+    fn cancelled_task_is_not_enqueued() {
+        for cancel_first in [true, false] {
+            let runner = Runner::new();
+            let session = Session::new(1);
+            let task_id = session.initiate_task();
+            session.set_task_qubits(task_id, 1);
+            session.set_task_qasm(task_id, "OPENQASM 2.0; qreg q[1];".to_string());
+            let task_id = task_id.to_string();
+
+            if cancel_first {
+                assert_eq!(
+                    session.handle_request(vec![&task_id, "CANCEL"], Arc::clone(&runner)),
+                    "OK YES\n"
+                );
+                assert_eq!(
+                    session.handle_request(vec![&task_id, "EXECUTE"], Arc::clone(&runner)),
+                    "ERROR Task is not valid or does not exist\n"
+                );
+            } else {
+                assert_eq!(
+                    session.handle_request(vec![&task_id, "EXECUTE"], Arc::clone(&runner)),
+                    "OK\n"
+                );
+                assert_eq!(
+                    session.handle_request(vec![&task_id, "CANCEL"], Arc::clone(&runner)),
+                    "OK YES\n"
+                );
+            }
+
+            assert!(runner.tasks_queue.lock().unwrap().is_empty());
+            assert_eq!(
+                session.handle_request(vec![&task_id, "EXISTS"], Arc::clone(&runner)),
+                "OK NO\n"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_execute_and_cancel_do_not_leave_queued_task() {
+        // Keep the runner stopped so this exercises enqueue/cancel ordering,
+        // without racing the native simulator or requiring running-task cancellation.
+        let runner = Runner::new();
+        let session = Session::new(1);
+
+        for _ in 0..1024 {
+            let task_id = session.initiate_task();
+            session.set_task_qubits(task_id, 1);
+            session.set_task_qasm(task_id, "OPENQASM 2.0; qreg q[1];".to_string());
+            let task_id_str = task_id.to_string();
+            let start = Barrier::new(2);
+
+            let (execute_response, cancel_response) = thread::scope(|scope| {
+                let execute = scope.spawn(|| {
+                    start.wait();
+                    session.handle_request(vec![&task_id_str, "EXECUTE"], Arc::clone(&runner))
+                });
+                start.wait();
+                let cancel_response =
+                    session.handle_request(vec![&task_id_str, "CANCEL"], Arc::clone(&runner));
+                (execute.join().unwrap(), cancel_response)
+            });
+
+            assert_eq!(
+                cancel_response, "OK YES\n",
+                "Task {task_id} was lost during submission"
+            );
+            assert!(
+                execute_response == "OK\n"
+                    || execute_response == "ERROR Task is not valid or does not exist\n"
+            );
+            assert!(
+                runner.tasks_queue.lock().unwrap().is_empty(),
+                "Task {task_id} was enqueued after cancellation"
+            );
+            assert!(!session.is_task_initiated(task_id));
+            assert!(!session.is_sent_to_runner(task_id));
+        }
+    }
 
     #[test]
     #[serial]
