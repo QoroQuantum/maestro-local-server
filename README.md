@@ -9,9 +9,13 @@ observable estimation), poll their status, and retrieve results as JSON.
 
 The server listens on `/run/maestro.sock` when run as the installed systemd service (or
 `/tmp/maestro.sock` in test mode). Each client session tracks a set of tasks; tasks are queued
-and executed one at a time by a background runner thread, which dispatches them into the
-Maestro simulation engine (via FFI bindings generated from Maestro's C `Interface.h`). Sessions
-that stay idle for too long are automatically cleaned up.
+and executed one at a time by a background runner thread. Each task runs in a fresh copy of
+the server executable in `--worker` mode, which calls Maestro through its C interface.
+Cancelling a running task terminates and reaps its worker process. Session deletion,
+idle-session cleanup, and daemon shutdown also cancel active work.
+
+The [worker process design](docs/worker-process.md) describes the implementation plan,
+module layout, private IPC protocol, cancellation ordering, and tests.
 
 Supported commands (newline-terminated):
 
@@ -41,9 +45,9 @@ The compiled binary is written to `target/release/maestro-local-server`.
 
 ## Testing
 
-Tests exercise the Unix socket server and the simulation runner end-to-end, sharing the
-`/tmp/maestro.sock` path and the Maestro engine. They are annotated with `#[serial]`, which
-already enforces serialized execution, so a plain:
+Tests exercise the Unix socket server, worker processes, and native simulation end-to-end.
+Tests sharing `/tmp/maestro.sock` or the in-process Maestro engine use `#[serial]`;
+isolated worker tests also cover cancellation, crashes, and IPC failures. A plain:
 
 ```bash
 cargo test

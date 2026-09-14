@@ -209,7 +209,9 @@ mod maestro_server {
         let _ = session_thread.join();
 
         // Stop the runner thread
-        runner.stop();
+        if let Err(error) = runner.stop() {
+            eprintln!("Failed to stop Maestro worker: {error}");
+        }
         let _ = runner_thread.join();
 
         println!("Maestro Local Server shut down gracefully.");
@@ -217,6 +219,18 @@ mod maestro_server {
 }
 
 fn main() {
+    // Worker mode must bypass daemon sockets, signal handlers, and runner startup.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == maestro::worker::WORKER_ARGUMENT)
+    {
+        if let Err(error) = maestro::worker::run() {
+            eprintln!("Maestro worker failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let (session_thread, runner, runner_thread, _) = maestro_server::start(true, false);
 
     maestro_server::stop(session_thread, runner, runner_thread);

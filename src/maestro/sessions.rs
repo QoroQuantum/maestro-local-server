@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::maestro::runner;
 
@@ -25,6 +26,7 @@ pub struct Session {
     sent_to_runner: Mutex<HashSet<u32>>,
     timer_counter: AtomicU32,
     task_counter: AtomicU32,
+    closed: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,7 @@ impl Session {
             sent_to_runner: Mutex::new(HashSet::new()),
             timer_counter: AtomicU32::new(0),
             task_counter: AtomicU32::new(0),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -167,6 +170,9 @@ impl Session {
         // Hold sent_to_runner through queue insertion to serialize submission
         // with cancellation. When both session locks are needed, take this one first.
         let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
         let mut initiated_tasks = self.initiated_tasks.lock().unwrap();
 
         let Some(task) = initiated_tasks.get(&task_id) else {
@@ -177,8 +183,7 @@ impl Session {
         }
 
         let task = initiated_tasks.remove(&task_id).unwrap();
-        sent_to_runner.insert(task_id);
-        runner.add_task(runner::Task::new(
+        let enqueued = runner.add_task(runner::Task::new(
             self.get_id(),
             task.task_id,
             task.task_type,
@@ -190,7 +195,10 @@ impl Session {
             task.options,
         ));
 
-        true
+        if enqueued {
+            sent_to_runner.insert(task_id);
+        }
+        enqueued
     }
 
     pub fn execution_finished(&self, task_id: u32) {
@@ -201,26 +209,35 @@ impl Session {
         self.sent_to_runner.lock().unwrap().contains(&task_id)
     }
 
-    fn remove_tasks(&self, runner: Arc<runner::Runner>) {
-        // walk over sent_to_runner and remove tasks from runner
-        for task_id in self.sent_to_runner.lock().unwrap().iter() {
-            runner.remove_task(self.get_id(), *task_id);
+    fn remove_tasks(&self, runner: Arc<runner::Runner>) -> std::io::Result<()> {
+        let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
+        // An in-flight request can still own an Arc after the manager removes
+        // this session. Prevent that request from submitting work after cleanup.
+        self.closed.store(true, Ordering::SeqCst);
+        self.initiated_tasks.lock().unwrap().clear();
+        let mut failure = None;
+        for task_id in sent_to_runner.drain() {
+            if let Err(error) = runner.remove_task(self.get_id(), task_id) {
+                failure.get_or_insert(error);
+            }
         }
+        failure.map_or(Ok(()), Err)
     }
 
-    pub fn cancel_task(&self, runner: Arc<runner::Runner>, task_id: u32) -> bool {
+    pub fn cancel_task(&self, runner: Arc<runner::Runner>, task_id: u32) -> std::io::Result<bool> {
         let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
         if sent_to_runner.contains(&task_id) || runner.is_running(self.get_id(), task_id) {
-            runner.remove_task(self.get_id(), task_id);
+            runner.remove_task(self.get_id(), task_id)?;
             sent_to_runner.remove(&task_id);
-            true
+            Ok(true)
         } else {
             // might be in 'initiated_tasks' but not yet sent to runner, so remove it from there
-            self.initiated_tasks
+            Ok(self
+                .initiated_tasks
                 .lock()
                 .unwrap()
                 .remove(&task_id)
-                .is_some()
+                .is_some())
         }
     }
 
@@ -231,6 +248,9 @@ impl Session {
     // NOTE: After GET_RESULTS the task will be removed
 
     pub fn handle_request(&self, request: Vec<&str>, runner: Arc<runner::Runner>) -> String {
+        if self.closed.load(Ordering::SeqCst) {
+            return String::from("ERROR Session is closed\n");
+        }
         self.reset_timer();
 
         if request[0] == "CREATE" {
@@ -259,11 +279,11 @@ impl Session {
                 }
             }
             "CANCEL" => {
-                if self.cancel_task(runner, task_id) {
-                    return String::from("OK YES\n");
-                } else {
-                    return String::from("OK NO\n");
-                }
+                return match self.cancel_task(runner, task_id) {
+                    Ok(true) => String::from("OK YES\n"),
+                    Ok(false) => String::from("OK NO\n"),
+                    Err(error) => format!("ERROR Could not cancel task: {error}\n"),
+                };
             }
             "VALID" => {
                 if self.is_sent_to_runner(task_id) {
@@ -459,13 +479,17 @@ impl SessionManager {
         self.sessions.lock().unwrap().contains_key(&session_id)
     }
 
-    pub fn remove_session(&self, session_id: u32, runner: Arc<runner::Runner>) {
-        let session = self.get_session(session_id);
-
-        self.sessions.lock().unwrap().remove(&session_id);
-
+    pub fn remove_session(
+        &self,
+        session_id: u32,
+        runner: Arc<runner::Runner>,
+    ) -> std::io::Result<bool> {
+        let session = self.sessions.lock().unwrap().remove(&session_id);
         if let Some(session) = session {
-            session.remove_tasks(runner);
+            session.remove_tasks(runner)?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -479,7 +503,9 @@ impl SessionManager {
             }
         }
         for session_id in sessions_to_remove {
-            self.remove_session(session_id, Arc::clone(&runner));
+            if let Err(error) = self.remove_session(session_id, Arc::clone(&runner)) {
+                eprintln!("Could not stop expired session {session_id}: {error}");
+            }
         }
     }
 
@@ -507,12 +533,11 @@ impl SessionManager {
             let session_id = session_id.unwrap();
 
             if parts[1] == "DELETE" {
-                if self.session_exists(session_id) {
-                    self.remove_session(session_id, runner);
-                    return String::from("OK\n");
-                } else {
-                    return String::from("ERROR Session does not exist\n");
-                }
+                return match self.remove_session(session_id, runner) {
+                    Ok(true) => String::from("OK\n"),
+                    Ok(false) => String::from("ERROR Session does not exist\n"),
+                    Err(error) => format!("ERROR Could not close session: {error}\n"),
+                };
             } else if parts[1] == "EXISTS" {
                 if self.session_exists(session_id) {
                     return String::from("OK YES\n");
@@ -521,9 +546,8 @@ impl SessionManager {
                 }
             }
 
-            if self.session_exists(session_id) {
+            if let Some(session) = self.get_session(session_id) {
                 if parts[1] == "TASK" && parts.len() >= 3 {
-                    let session = self.get_session(session_id).unwrap();
                     session.handle_request(parts[2..].to_vec(), runner)
                 } else {
                     String::from("ERROR Unknown command\n")

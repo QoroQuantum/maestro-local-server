@@ -4,8 +4,8 @@ use std::thread;
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::maestro;
 
@@ -55,6 +55,7 @@ impl Task {
     }
 
     pub fn execute(&mut self) -> String {
+        // Native execution is called only by worker mode, in the child process.
         let mut simulator = maestro::simulators::SimpleSimulator::new(self.nr_qubits);
         let _res = simulator.remove_all_optimization_simulators_and_add(self.sim_type, self.method);
 
@@ -91,13 +92,20 @@ impl TaskResult {
 }
 
 #[derive(Debug)]
+struct ActiveTask {
+    session_id: u32,
+    task_id: u32,
+    execution: Arc<maestro::worker::Execution>,
+}
+
+#[derive(Debug)]
 pub struct Runner {
     tasks_queue: Mutex<VecDeque<Task>>,
     results_map: Mutex<HashMap<u64, TaskResult>>,
     stop: AtomicBool,
-    running: AtomicBool,
-    running_task_id: atomic::AtomicU32,
-    running_session_id: atomic::AtomicU32,
+    // Lock order: tasks_queue -> active_task -> results_map. Register a task
+    // before releasing the queue lock, including while its worker is starting.
+    active_task: Mutex<Option<ActiveTask>>,
 }
 
 impl Runner {
@@ -112,60 +120,38 @@ impl Runner {
             tasks_queue: tasks_mutex,
             results_map: results_mutex,
             stop: std::sync::atomic::AtomicBool::new(false),
-            running: std::sync::atomic::AtomicBool::new(false),
-            running_task_id: std::sync::atomic::AtomicU32::new(0),
-            running_session_id: std::sync::atomic::AtomicU32::new(0),
+            active_task: Mutex::new(None),
         };
 
         Arc::new(myself)
     }
 
     pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
-        // TODO: add the posibility to cancel a running task (should be done when the session is closed/deleted)
         thread::spawn(move || {
             loop {
-                // Check if we need to stop
-                if runner.stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-
-                // Get a task from the queue
+                // Dequeue and register together, so cancellation cannot miss
+                // a task between leaving the queue and spawning its worker.
                 let task_opt = {
                     let mut queue = runner.tasks_queue.lock().unwrap();
-                    if queue.is_empty() {
-                        runner
-                            .running
-                            .store(false, std::sync::atomic::Ordering::SeqCst);
-                    } else {
-                        runner.running_task_id.store(
-                            queue.front().unwrap().task_id,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        runner.running_session_id.store(
-                            queue.front().unwrap().session_id,
-                            std::sync::atomic::Ordering::SeqCst,
-                        );
-                        runner
-                            .running
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    if runner.stop.load(Ordering::SeqCst) {
+                        break;
                     }
-                    queue.pop_front()
+                    queue.pop_front().map(|task| {
+                        let execution = Arc::new(maestro::worker::Execution::new());
+                        *runner.active_task.lock().unwrap() = Some(ActiveTask {
+                            session_id: task.session_id,
+                            task_id: task.task_id,
+                            execution: Arc::clone(&execution),
+                        });
+                        (task, execution)
+                    })
                 };
 
-                if let Some(mut task) = task_opt {
-                    // Execute the task
-                    let result = task.execute();
-                    // Store the result
-                    let task_result = TaskResult::new(task.session_id, task.task_id, result);
-                    let mut results = runner.results_map.lock().unwrap();
-                    results.insert(
-                        (task.session_id as u64) << 32 | (task.task_id as u64),
-                        task_result,
-                    );
-
-                    runner
-                        .running
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Some((task, execution)) = task_opt {
+                    // Previous in-process execution, retained for comparison:
+                    // let result = task.execute();
+                    let outcome = maestro::worker::execute(&task, &execution);
+                    runner.finish_task(&task, &execution, outcome);
                 } else {
                     // No tasks, sleep for a while
                     thread::sleep(std::time::Duration::from_millis(1));
@@ -176,13 +162,64 @@ impl Runner {
         })
     }
 
-    pub fn stop(&self) {
-        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    fn finish_task(
+        &self,
+        task: &Task,
+        execution: &Arc<maestro::worker::Execution>,
+        outcome: maestro::worker::Outcome,
+    ) {
+        let mut active = self.active_task.lock().unwrap();
+        if !active
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(&active.execution, execution))
+        {
+            return; // Cancellation already cleared this execution.
+        }
+        // Cancellation requests and result publication use this same lock.
+        // Once cancellation wins, even a complete buffered result is discarded.
+        if !execution.is_cancelled() {
+            let result = match outcome {
+                maestro::worker::Outcome::Completed(result) => Some(result),
+                maestro::worker::Outcome::Failed(error) => {
+                    eprintln!(
+                        "Maestro task {}:{} failed: {error}",
+                        task.session_id, task.task_id
+                    );
+                    Some(String::new()) // Existing FAILED protocol semantics.
+                }
+                maestro::worker::Outcome::Cancelled => None,
+            };
+            if let Some(result) = result {
+                self.results_map.lock().unwrap().insert(
+                    (task.session_id as u64) << 32 | task.task_id as u64,
+                    TaskResult::new(task.session_id, task.task_id, result),
+                );
+            }
+        }
+        *active = None;
     }
 
-    pub fn add_task(&self, task: Task) {
+    pub fn stop(&self) -> std::io::Result<()> {
+        let execution = {
+            let mut queue = self.tasks_queue.lock().unwrap();
+            self.stop.store(true, Ordering::SeqCst);
+            queue.clear();
+            let active = self.active_task.lock().unwrap();
+            active.as_ref().map(|active| {
+                active.execution.request_cancel();
+                Arc::clone(&active.execution)
+            })
+        };
+        self.cancel_execution(execution)
+    }
+
+    pub fn add_task(&self, task: Task) -> bool {
         let mut queue = self.tasks_queue.lock().unwrap();
+        if self.stop.load(Ordering::SeqCst) {
+            return false;
+        }
         queue.push_back(task);
+        true
     }
 
     pub fn is_task_result_available(&self, session_id: u32, task_id: u32) -> bool {
@@ -204,29 +241,50 @@ impl Runner {
     }
 
     pub fn is_running(&self, session_id: u32, task_id: u32) -> bool {
-        if self.running.load(std::sync::atomic::Ordering::SeqCst) {
-            let running_session_id = self
-                .running_session_id
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let running_task_id = self
-                .running_task_id
-                .load(std::sync::atomic::Ordering::SeqCst);
-            return running_session_id == session_id && running_task_id == task_id;
-        }
-
-        false
+        self.active_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|active| active.session_id == session_id && active.task_id == task_id)
     }
 
-    pub fn remove_task(&self, session_id: u32, task_id: u32) {
-        let mut queue = self.tasks_queue.lock().unwrap();
-        queue.retain(|task| !(task.session_id == session_id && task.task_id == task_id));
+    pub fn remove_task(&self, session_id: u32, task_id: u32) -> std::io::Result<()> {
+        let execution = {
+            let mut queue = self.tasks_queue.lock().unwrap();
+            queue.retain(|task| !(task.session_id == session_id && task.task_id == task_id));
+            let active = self.active_task.lock().unwrap();
+            let execution = active
+                .as_ref()
+                .filter(|active| active.session_id == session_id && active.task_id == task_id)
+                .map(|active| {
+                    active.execution.request_cancel();
+                    Arc::clone(&active.execution)
+                });
+            self.results_map
+                .lock()
+                .unwrap()
+                .remove(&((session_id as u64) << 32 | task_id as u64));
+            execution
+        };
+        // Process termination and reaping never hold the queue or result locks.
+        self.cancel_execution(execution)
+    }
 
-        // TODO: also stop and remove the task if it's currently running.
-        // This is a bit more complicated, as we need to signal the running task to stop. For now, we just remove it from the queue.
-
-        // this is usually called when a session is closed, so we should also remove the result if it exists
-        let mut results = self.results_map.lock().unwrap();
-        results.remove(&((session_id as u64) << 32 | (task_id as u64)));
+    fn cancel_execution(
+        &self,
+        execution: Option<Arc<maestro::worker::Execution>>,
+    ) -> std::io::Result<()> {
+        if let Some(execution) = execution {
+            execution.cancel_and_wait()?;
+            let mut active = self.active_task.lock().unwrap();
+            if active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.execution, &execution))
+            {
+                *active = None;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -391,3 +449,6 @@ mod tests_runner {
         assert!(!runner.is_task_result_failed(2, 2));
     }
 }
+
+#[cfg(test)]
+mod process_tests;

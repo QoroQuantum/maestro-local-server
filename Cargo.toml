@@ -19,12 +19,12 @@ assets = [
 maintainer-scripts = "debian/scripts"
 
 [dependencies]
+libc = "0.2"
 signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
 json = "*"
 serial_test = { version = "*" }
 
 [build-dependencies]
 bindgen = "*"
-
 
 
