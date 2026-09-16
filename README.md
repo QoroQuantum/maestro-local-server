@@ -29,15 +29,38 @@ Supported commands (newline-terminated):
 
 - Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
 - `libclang` (required by `bindgen` at build time), e.g. `sudo apt install libclang-dev`
-- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library built and installed so that
-  `libmaestro.so` and `maestrolib/Interface.h` are available; this crate links against it
-  dynamically and looks for it in `/usr/local/`. Build it from the sibling `maestro` checkout
-  with `./build.sh` and install it before building this project.
+- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library built from source.
 - For building the `.deb` package: `cargo install cargo-deb`
 
-## Compiling
+## Local development setup
+
+With `maestro` and `maestro-local-server` checked out next to each other:
 
 ```bash
+export MAESTRO_DIR="$(realpath ../maestro)"
+cargo build --release
+sudo -u root -g users ./target/release/maestro-local-server
+```
+
+`MAESTRO_DIR` may point to a Maestro checkout anywhere on the system. Its `build/libmaestro.so`
+location is embedded in the server binary, so `LD_LIBRARY_PATH` is not required.
+
+For a separate CMake build directory, set `MAESTRO_LIBRARY_DIR` to the directory
+containing `libmaestro.so`. `MAESTRO_HEADER` can override the path to `Interface.h`.
+Both overrides take precedence over `MAESTRO_DIR`; setting both also allows builds
+without `MAESTRO_DIR`. The selected library directory is used for the runtime
+search path. Rebuild Maestro and the server together so their native API versions
+match. See [Native Maestro API v2](docs/native-api-v2.md) for the request protocol,
+MPI profiles, and runtime configuration.
+
+After changing Maestro, rebuild both projects and restart the server:
+
+```bash
+cd ../maestro
+cmake --build build -j8
+
+cd ../maestro-local-server
+export MAESTRO_DIR="$(realpath ../maestro)"
 cargo build --release
 ```
 

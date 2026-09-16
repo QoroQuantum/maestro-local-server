@@ -3,9 +3,12 @@
 The daemon and all workers are native Rust/C/C++. No Python interpreter is embedded
 or spawned. Legacy `SESSION`/`TASK` commands and payloads remain supported.
 Rebuild Maestro first, then this server against its updated `Interface.h` and
-library. `MAESTRO_HEADER` and `MAESTRO_LIBRARY_DIR` select nondefault build inputs;
-ensure the matching library is found at runtime. Default build paths retain the
-previous installed-library behavior.
+library. Set `MAESTRO_DIR` to the Maestro checkout; the default inputs are
+`maestrolib/Interface.h` and `build/libmaestro.so` inside that checkout.
+`MAESTRO_HEADER` and `MAESTRO_LIBRARY_DIR` override those inputs independently.
+Setting both overrides also permits building without `MAESTRO_DIR`, for example
+with an installed header and library or a separate CMake build directory. The
+selected library directory is embedded in the binary's runtime search path.
 
 ## Protocol
 

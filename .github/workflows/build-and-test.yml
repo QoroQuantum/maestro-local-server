@@ -17,9 +17,6 @@ jobs:
       - name: Checkout maestro-local-server
         uses: actions/checkout@v5
 
-      # build.rs / wrapper.h expect the Maestro C++ library to live at
-      # ../../maestro relative to this crate's root, so it's cloned as a
-      # sibling checkout two directories above the workspace.
       - name: Resolve Maestro checkout path
         id: paths
         run: |
@@ -121,7 +118,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
+        env:
+          MAESTRO_DIR: ${{ steps.paths.outputs.maestro_dir }}
         run: cargo build --verbose
 
       - name: Test
+        env:
+          MAESTRO_DIR: ${{ steps.paths.outputs.maestro_dir }}
         run: cargo test --verbose
