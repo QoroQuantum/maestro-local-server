@@ -13,6 +13,8 @@ use crate::maestro;
 pub enum TaskType {
     Execute,
     Estimate,
+    Request,
+    ValidateRequest,
 }
 
 #[derive(Debug)]
@@ -55,12 +57,19 @@ impl Task {
     }
 
     pub fn execute(&mut self) -> String {
+        if matches!(self.task_type, TaskType::Request) {
+            return maestro::simulators::run_request(&self.qasm);
+        }
+        if matches!(self.task_type, TaskType::ValidateRequest) {
+            return maestro::simulators::validate_request(&self.qasm);
+        }
         // Native execution is called only by worker mode, in the child process.
         let mut simulator = maestro::simulators::SimpleSimulator::new(self.nr_qubits);
         let _res = simulator.remove_all_optimization_simulators_and_add(self.sim_type, self.method);
 
         let result = match self.task_type {
             TaskType::Execute => simulator.execute(self.qasm.clone(), self.options.clone()),
+            TaskType::Request | TaskType::ValidateRequest => unreachable!(),
             TaskType::Estimate => simulator.estimate(
                 self.qasm.clone(),
                 self.observables.clone(),
@@ -79,6 +88,8 @@ pub struct TaskResult {
     pub session_id: u32,
     pub task_id: u32,
     pub result: String,
+    pub error: Option<String>,
+    pub logs: String,
 }
 
 impl TaskResult {
@@ -87,6 +98,8 @@ impl TaskResult {
             session_id,
             task_id,
             result,
+            error: None,
+            logs: String::new(),
         }
     }
 }
@@ -102,6 +115,7 @@ struct ActiveTask {
 pub struct Runner {
     tasks_queue: Mutex<VecDeque<Task>>,
     results_map: Mutex<HashMap<u64, TaskResult>>,
+    consumed_diagnostics: Mutex<HashMap<u64, (String, Option<String>)>>,
     stop: AtomicBool,
     // Lock order: tasks_queue -> active_task -> results_map. Register a task
     // before releasing the queue lock, including while its worker is starting.
@@ -119,6 +133,7 @@ impl Runner {
         let myself = Self {
             tasks_queue: tasks_mutex,
             results_map: results_mutex,
+            consumed_diagnostics: Mutex::new(HashMap::new()),
             stop: std::sync::atomic::AtomicBool::new(false),
             active_task: Mutex::new(None),
         };
@@ -178,6 +193,7 @@ impl Runner {
         // Cancellation requests and result publication use this same lock.
         // Once cancellation wins, even a complete buffered result is discarded.
         if !execution.is_cancelled() {
+            let mut failure = None;
             let result = match outcome {
                 maestro::worker::Outcome::Completed(result) => Some(result),
                 maestro::worker::Outcome::Failed(error) => {
@@ -185,14 +201,18 @@ impl Runner {
                         "Maestro task {}:{} failed: {error}",
                         task.session_id, task.task_id
                     );
+                    failure = Some(error.to_string());
                     Some(String::new()) // Existing FAILED protocol semantics.
                 }
                 maestro::worker::Outcome::Cancelled => None,
             };
             if let Some(result) = result {
+                let mut record = TaskResult::new(task.session_id, task.task_id, result);
+                record.error = failure;
+                record.logs = execution.logs();
                 self.results_map.lock().unwrap().insert(
                     (task.session_id as u64) << 32 | task.task_id as u64,
-                    TaskResult::new(task.session_id, task.task_id, result),
+                    record,
                 );
             }
         }
@@ -237,7 +257,31 @@ impl Runner {
     pub fn get_result(&self, session_id: u32, task_id: u32) -> Option<TaskResult> {
         let mut results = self.results_map.lock().unwrap();
 
-        results.remove(&((session_id as u64) << 32 | (task_id as u64)))
+        let key = (session_id as u64) << 32 | task_id as u64;
+        let result = results.remove(&key);
+        if let Some(record) = result.as_ref() {
+            self.consumed_diagnostics.lock().unwrap().insert(key, (record.logs.clone(), record.error.clone()));
+        }
+        result
+    }
+
+    pub fn diagnostics(&self, session_id: u32, task_id: u32) -> (String, Option<String>) {
+        let active = self.active_task.lock().unwrap();
+        if let Some(active) = active.as_ref().filter(|a| a.session_id == session_id && a.task_id == task_id) {
+            return (active.execution.logs(), None);
+        }
+        let results = self.results_map.lock().unwrap();
+        results.get(&((session_id as u64) << 32 | task_id as u64))
+            .map(|r| (r.logs.clone(), r.error.clone()))
+            .or_else(|| self.consumed_diagnostics.lock().unwrap().get(&((session_id as u64) << 32 | task_id as u64)).cloned())
+            .unwrap_or_default()
+    }
+
+    pub fn has_consumed_diagnostics(&self, session_id: u32, task_id: u32) -> bool {
+        self.consumed_diagnostics.lock().unwrap().contains_key(&((session_id as u64) << 32 | task_id as u64))
+    }
+    pub fn clear_session_diagnostics(&self, session_id: u32) {
+        self.consumed_diagnostics.lock().unwrap().retain(|key, _| (*key >> 32) as u32 != session_id);
     }
 
     pub fn is_running(&self, session_id: u32, task_id: u32) -> bool {

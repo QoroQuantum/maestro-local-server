@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -24,11 +24,12 @@ mod maestro_server {
         use_tmp_file: bool,
     ) -> std::io::Result<()> {
         println!("Creating Maestro Socket...");
-        let socket_path = if use_tmp_file {
+        let configured_socket = std::env::var("MAESTRO_SOCKET").ok();
+        let socket_path = configured_socket.as_deref().unwrap_or(if use_tmp_file {
             "/tmp/maestro.sock"
         } else {
             "/run/maestro.sock"
-        };
+        });
 
         if std::fs::metadata(socket_path).is_ok() {
             println!("A socket is already present. Deleting...");
@@ -93,12 +94,18 @@ mod maestro_server {
             stream.set_nonblocking(false).unwrap();
 
             let mut message = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("clone socket"));
 
             loop {
                 message.clear();
-                let mut reader = BufReader::new(&stream);
-
-                let res = reader.read_line(&mut message);
+                let res = reader.by_ref().take((maestro::api::MAX_REQUEST_BYTES + 1) as u64).read_line(&mut message);
+                if message.len() > maestro::api::MAX_REQUEST_BYTES {
+                    let response = if message.starts_with("API ") {
+                        maestro::api::oversized_response()
+                    } else { "ERROR Request exceeds size limit\n".into() };
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
                 if res.is_err() {
                     break;
                 }
@@ -109,7 +116,9 @@ mod maestro_server {
 
                 let response;
 
-                if let Some(substring) = message.strip_prefix("SESSION ") {
+                if let Some(document) = message.strip_prefix("API ") {
+                    response = maestro::api::handle(document, &session_manager, &runner);
+                } else if let Some(substring) = message.strip_prefix("SESSION ") {
                     response =
                         session_manager.handle_request(substring.to_string(), Arc::clone(&runner));
                 } else if message == "PING" || message == "PING\n" {
@@ -134,6 +143,39 @@ mod maestro_server {
                 //});
             }
         });
+    }
+
+    #[cfg(test)]
+    mod transport_tests {
+        use super::*;
+        #[test]
+        fn api_size_boundary_keeps_versioned_error_envelopes() {
+            for (api, extra) in [(true, 0), (true, 1), (false, 1)] {
+                let manager = maestro::sessions::SessionManager::new(100);
+                let id = manager.create_session();
+                let runner = maestro::runner::Runner::new();
+                let (mut client, server) = UnixStream::pair().unwrap();
+                client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                client.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                handle_connection(server, manager, runner);
+                let mut frame = if api {
+                    format!("API {}", json::object! {version:2, command:"keepalive", session_id:id}.dump())
+                } else { "SESSION ".to_owned() };
+                let target = maestro::api::MAX_REQUEST_BYTES + extra;
+                frame.extend(std::iter::repeat_n(' ', target - frame.len() - 1));
+                frame.push('\n');
+                client.write_all(frame.as_bytes()).unwrap();
+                client.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut reply = String::new();
+                BufReader::new(client).read_line(&mut reply).unwrap();
+                if api {
+                    let value = json::parse(reply.strip_prefix("OK ").unwrap()).unwrap();
+                    assert_eq!(value["version"], 2);
+                    assert_eq!(value["ok"], extra == 0);
+                    if extra != 0 { assert_eq!(value["error"]["code"], "invalid_input"); }
+                } else { assert_eq!(reply, "ERROR Request exceeds size limit\n"); }
+            }
+        }
     }
 
     pub fn start(
@@ -163,7 +205,9 @@ mod maestro_server {
             }
         });
 
-        let session_manager = maestro::sessions::SessionManager::new(50);
+        // Production leases default to one hour; legacy tests set their own clock.
+        let lease_seconds = maestro::api::session_lease_seconds();
+        let session_manager = maestro::sessions::SessionManager::new(lease_seconds.saturating_mul(5));
         let session_manager_clone = Arc::clone(&session_manager);
 
         // start runner as well
@@ -226,7 +270,7 @@ fn main() {
     {
         if let Err(error) = maestro::worker::run() {
             eprintln!("Maestro worker failed: {error}");
-            std::process::exit(1);
+            std::process::exit(error.exit_code());
         }
         return;
     }
@@ -624,7 +668,7 @@ mod server_tests {
             "Execute result counts '11000' value is not 1"
         );
         assert!(
-            parsed["simulator"] == "aer",
+            parsed["simulator"] == if maestro::simulators::test_backend_id("qcsim") == 0 { "qcsim" } else { "aer" },
             "Execute result simulator is not 'aer'"
         );
         assert!(
@@ -844,7 +888,7 @@ mod server_tests {
         );
 
         let response =
-            send_command_close(&format!("SESSION {} TASK 0 SET_SIM_TYPE 1", session_id)).unwrap();
+            send_command_close(&format!("SESSION {} TASK 0 SET_SIM_TYPE {}", session_id, maestro::simulators::test_backend_id("qcsim"))).unwrap();
         assert!(
             response == "OK\n",
             "Expected OK for setting simulator type, got: {}",

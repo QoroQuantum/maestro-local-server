@@ -5,7 +5,11 @@ use std::path::PathBuf;
 
 fn main() {
     // Tell cargo to look for shared libraries in the specified directory
-    println!("cargo:rustc-link-search=/usr/local/");
+    let library_dir = env::var("MAESTRO_LIBRARY_DIR").unwrap_or_else(|_| "/usr/local".into());
+    let header = env::var("MAESTRO_HEADER").unwrap_or_else(|_| "wrapper.h".into());
+    println!("cargo:rerun-if-env-changed=MAESTRO_LIBRARY_DIR");
+    println!("cargo:rerun-if-env-changed=MAESTRO_HEADER");
+    println!("cargo:rustc-link-search={library_dir}");
 
     // Tell cargo to tell rustc to link the maestro
     // shared library, dynamically
@@ -19,7 +23,7 @@ fn main() {
         .clang_args(["-x", "c++", "-std=c++17"].iter())
         // The input header we would like to generate
         // bindings for.
-        .header("wrapper.h")
+        .header(header)
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

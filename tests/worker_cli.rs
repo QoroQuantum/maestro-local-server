@@ -34,6 +34,14 @@ fn same_binary_worker_executes_and_estimates_without_starting_daemon() {
                 .spawn()
                 .unwrap(),
         );
+        let mut ready_header = [0; 8];
+        socket.read_exact(&mut ready_header).unwrap();
+        let mut ready = vec![0; u64::from_be_bytes(ready_header) as usize];
+        socket.read_exact(&mut ready).unwrap();
+        assert_eq!(
+            json::parse(std::str::from_utf8(&ready).unwrap()).unwrap()["ready"],
+            true
+        );
         let request = json::object! {
             version: 1, session_id: 42, task_id: 7, task_type: task_type,
             qasm: "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nx q[0];\nmeasure q[0]->c[0];",

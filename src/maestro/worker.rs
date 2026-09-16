@@ -6,20 +6,45 @@
 
 mod protocol;
 
-use std::io;
+use std::io::{self, Read};
 use std::net::Shutdown;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use super::runner::Task;
+use super::{diagnostics, runner::Task};
 
 pub const WORKER_ARGUMENT: &str = "--worker";
+// These private exit codes distinguish a failed operation from unknown remote
+// cleanup. In particular, losing the result socket after cleanup is safe to reap.
+pub const CLEANUP_CONFIRMED_EXIT: i32 = 76;
+
+#[derive(Debug)]
+pub struct Failure {
+    pub error: io::Error,
+    pub cleanup_confirmed: bool,
+}
+
+impl Failure {
+    pub fn exit_code(&self) -> i32 {
+        if self.cleanup_confirmed {
+            CLEANUP_CONFIRMED_EXIT
+        } else {
+            75
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
 
 #[derive(Debug)]
 pub enum Outcome {
@@ -31,6 +56,7 @@ pub enum Outcome {
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum Phase {
+    WaitingForReady = 4,
     WritingTask = 1,
     ReadingResult = 2,
     WaitingForExit = 3,
@@ -40,6 +66,10 @@ enum Phase {
 struct Process {
     child: Option<Child>,
     socket: Option<UnixStream>,
+    mpi: bool,
+    ready: bool,
+    // Reaping cannot turn a previously unconfirmed cleanup into a success ACK.
+    cleanup_error: Option<(io::ErrorKind, String)>,
 }
 
 /// One execution, including the period before its child has been spawned.
@@ -47,6 +77,7 @@ struct Process {
 pub struct Execution {
     cancelled: AtomicBool,
     process: Mutex<Process>,
+    logs: Arc<Mutex<Vec<u8>>>,
     // Lets regression tests cancel at a specific blocking operation, rather
     // than accidentally cancelling every test before the worker has started.
     #[cfg(test)]
@@ -62,6 +93,10 @@ impl Execution {
     /// publication of a completed result have a single, well-defined ordering.
     pub fn request_cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn logs(&self) -> String {
+        String::from_utf8_lossy(&self.logs.lock().unwrap()).into_owned()
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -90,6 +125,10 @@ impl Execution {
                 if let Some(status) = child.try_wait()? {
                     process.child = None;
                     process.socket = None;
+                    if process.mpi && !cleanup_confirmed(status) {
+                        let error = unconfirmed_exit(status);
+                        process.cleanup_error = Some((error.kind(), error.to_string()));
+                    }
                     return Ok(status);
                 }
                 #[cfg(test)]
@@ -108,13 +147,42 @@ impl Drop for Execution {
             .process
             .get_mut()
             .unwrap_or_else(|error| error.into_inner());
-        if let Err(error) = terminate(process) {
+        if process.child.is_some()
+            && let Err(error) = terminate(process)
+        {
             eprintln!("Failed to clean up Maestro worker: {error}");
         }
     }
 }
 
 fn terminate(process: &mut Process) -> io::Result<()> {
+    if process.child.is_none()
+        && let Some((kind, message)) = &process.cleanup_error
+    {
+        return Err(io::Error::new(*kind, message.clone()));
+    }
+    let result = terminate_child(process);
+    if let Err(error) = &result {
+        process.cleanup_error = Some((error.kind(), error.to_string()));
+    } else {
+        // A transient signalling error may leave a live child. A later attempt
+        // must still be allowed to stop it and observe actual cleanup.
+        process.cleanup_error = None;
+    }
+    result
+}
+
+fn cleanup_confirmed(status: ExitStatus) -> bool {
+    status.success() || status.code() == Some(CLEANUP_CONFIRMED_EXIT)
+}
+
+fn unconfirmed_exit(status: ExitStatus) -> io::Error {
+    io::Error::other(format!(
+        "MPI supervisor exited without confirming cleanup: {status}"
+    ))
+}
+
+fn terminate_child(process: &mut Process) -> io::Result<()> {
     if let Some(socket) = &process.socket {
         // Wake any parent-side read/write, including a socket inherited by a
         // descendant of the worker. No runner/session locks are held here.
@@ -125,6 +193,40 @@ fn terminate(process: &mut Process) -> io::Result<()> {
         // reaping the leader so its PID cannot be reused for an unrelated group.
         let group = libc::pid_t::try_from(child.id())
             .map_err(|_| io::Error::other("Invalid worker process ID"))?;
+        if process.mpi && process.ready {
+            // Let the launcher finish remote-rank cleanup before reaping its
+            // supervisor. A forced timeout is an error, never a success ACK.
+            unsafe {
+                libc::kill(group, libc::SIGTERM);
+            }
+            let deadline =
+                std::time::Instant::now() + super::mpi::CLEANUP_TIMEOUT + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    process.child = None;
+                    process.socket = None;
+                    return if cleanup_confirmed(status) {
+                        Ok(())
+                    } else {
+                        Err(unconfirmed_exit(status))
+                    };
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            process.child = None;
+            process.socket = None;
+            return Err(io::Error::other(
+                "MPI cleanup timed out; remote rank termination could not be confirmed",
+            ));
+        }
         // SAFETY: kill takes an integer process-group ID, with no pointers.
         if unsafe { libc::kill(-group, libc::SIGKILL) } == -1 {
             let error = io::Error::last_os_error();
@@ -166,13 +268,46 @@ pub fn execute(task: &Task, execution: &Execution) -> Outcome {
     }
 }
 
+/// Parse untrusted native input in a child before allocating a public task ID.
+/// A rejected request is a completed validation response, not a worker failure.
+pub fn validate_request(request: &str) -> io::Result<String> {
+    validate_with_command(request, worker_command()?)
+}
+fn validate_with_command(request: &str, command: Command) -> io::Result<String> {
+    let task = Task::new(
+        0,
+        0,
+        super::runner::TaskType::ValidateRequest,
+        request.to_owned(),
+        String::new(),
+        0,
+        0,
+        0,
+        String::new(),
+    );
+    let execution = Execution::new();
+    match execute_with_command(&task, &execution, command) {
+        Outcome::Completed(value) => Ok(value),
+        Outcome::Failed(error) => Err(io::Error::other(format!(
+            "Native validation worker failed: {error}; {}",
+            execution.logs()
+        ))),
+        Outcome::Cancelled => Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "Validation cancelled",
+        )),
+    }
+}
+
 fn execute_with_command(task: &Task, execution: &Execution, mut command: Command) -> Outcome {
+    let stop_logs = Arc::new(AtomicBool::new(false));
+    let mut log_threads = Vec::new();
     let result = (|| {
         let (mut socket, child_socket) = UnixStream::pair()?;
         command
             .stdin(Stdio::from(OwnedFd::from(child_socket)))
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .process_group(0);
         {
             let mut process = execution.process.lock().unwrap();
@@ -182,14 +317,48 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
                     "Task cancelled before spawn",
                 ));
             }
+            process.mpi = matches!(task.task_type, super::runner::TaskType::Request)
+                && json::parse(&task.qasm).is_ok_and(|value| value["launch"].is_object());
             process.socket = Some(socket.try_clone()?);
-            process.child = Some(command.spawn()?);
+            let mut child = command.spawn()?;
+            if let Some(stdout) = child.stdout.take() {
+                log_threads.push(drain_log(
+                    stdout,
+                    Arc::clone(&execution.logs),
+                    Arc::clone(&stop_logs),
+                ));
+            }
+            if let Some(stderr) = child.stderr.take() {
+                log_threads.push(drain_log(
+                    stderr,
+                    Arc::clone(&execution.logs),
+                    Arc::clone(&stop_logs),
+                ));
+            }
+            process.child = Some(child);
         }
         // Command retains its configured stdin after spawn. Close that copy of
         // the child's socket now, or a worker crash/truncated reply cannot yield EOF.
         drop(command);
 
         // These blocking operations hold no process/runner/session mutex.
+        #[cfg(test)]
+        execution
+            .phase
+            .store(Phase::WaitingForReady as u8, Ordering::SeqCst);
+        protocol::read_ready(&mut socket)?;
+        {
+            let mut process = execution.process.lock().unwrap();
+            if execution.is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Task cancelled before upload",
+                ));
+            }
+            // Mark before sending any task bytes. Without them the worker
+            // cannot launch ranks, so cancellation before this point is local.
+            process.ready = true;
+        }
         #[cfg(test)]
         execution
             .phase
@@ -202,9 +371,19 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
         let result = protocol::read_result(&mut socket, task)?;
         let status = execution.wait()?;
         if !status.success() {
+            if let Some(error) = diagnostics::native_error(&result) {
+                return Err(error);
+            }
             return Err(io::Error::other(format!(
                 "Maestro worker exited with {status}"
             )));
+        }
+        // Native errors still represent a finished worker. Reap it before
+        // classifying the result, especially after MPI has finalized its ranks.
+        if matches!(task.task_type, super::runner::TaskType::Request)
+            && json::parse(&result).ok().and_then(|v| v["ok"].as_bool()) != Some(true)
+        {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, result));
         }
         Ok(result)
     })();
@@ -212,8 +391,16 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
     // Protocol failures must also stop and reap the worker (it may still be
     // running). Successful executions have already been reaped by wait().
     let cleanup = terminate(&mut execution.process.lock().unwrap());
+    stop_logs.store(true, Ordering::SeqCst);
+    for reader in log_threads {
+        let _ = reader.join();
+    }
     if let Err(error) = cleanup {
-        return Outcome::Failed(error);
+        return Outcome::Failed(diagnostics::with_causes(
+            error,
+            "cleanup_unconfirmed",
+            &result.as_ref().err().into_iter().collect::<Vec<_>>(),
+        ));
     }
     if execution.is_cancelled() {
         Outcome::Cancelled
@@ -225,19 +412,99 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
     }
 }
 
+// Drain pipes concurrently and keep a bounded prefix. Nonblocking reads let
+// cleanup finish even if a native descendant inherited a log descriptor.
+fn drain_log<T: Read + AsRawFd + Send + 'static>(
+    mut pipe: T,
+    logs: Arc<Mutex<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let fd = pipe.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return;
+        }
+        let mut buffer = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let mut output = logs.lock().unwrap();
+                    let remaining = (64 * 1024usize).saturating_sub(output.len());
+                    output.extend_from_slice(&buffer[..count.min(remaining)]);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    })
+}
+
 fn worker_socket() -> io::Result<UnixStream> {
     Ok(UnixStream::from(io::stdin().as_fd().try_clone_to_owned()?))
 }
 
 /// Called by main before installing daemon signal handlers or starting threads.
-pub fn run() -> io::Result<()> {
-    let mut socket = worker_socket()?;
-    let mut task = protocol::read_task(&mut socket)?;
-    let result = task.execute();
-    if result.is_empty() {
-        return Err(io::Error::other("Maestro returned an empty result"));
-    }
-    protocol::write_result(&mut socket, &task, &result)
+pub fn run() -> Result<(), Failure> {
+    let mut cleanup_confirmed = true; // No launcher has started.
+    let result = (|| {
+        #[cfg(test)]
+        tests::pause_worker("before_ready", None);
+        let signals = super::mpi::Cancellation::new()?;
+        let mut socket = worker_socket()?;
+        protocol::write_ready(&mut socket)?;
+        #[cfg(test)]
+        tests::pause_worker("before_read", Some(&signals.cancelled));
+        let mut task = protocol::read_task(&mut socket)?;
+        #[cfg(test)]
+        tests::pause_worker("after_task", Some(&signals.cancelled));
+        if signals.cancelled.load(Ordering::SeqCst) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Cancelled before launch",
+            ));
+        }
+        let result = if matches!(task.task_type, super::runner::TaskType::Request)
+            && json::parse(&task.qasm).is_ok_and(|value| value["launch"].is_object())
+        {
+            match super::mpi::run(&task.qasm, &signals.cancelled, &mut cleanup_confirmed) {
+                Ok(result) => result,
+                Err(error) if !cleanup_confirmed => {
+                    let error = diagnostics::with_causes(error, "cleanup_unconfirmed", &[]);
+                    // Publish diagnostics even when cleanup is uncertain. The
+                    // nonzero exit still prevents successful task/cancel ACKs.
+                    let _ =
+                        protocol::write_result(&mut socket, &task, &diagnostics::envelope(&error));
+                    return Err(error);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                Err(error) => diagnostics::envelope(&diagnostics::with_causes(
+                    error,
+                    "mpi_launcher_failure",
+                    &[],
+                )),
+            }
+        } else {
+            task.execute()
+        };
+        #[cfg(test)]
+        tests::pause_worker("after_cleanup", Some(&signals.cancelled));
+        if result.is_empty() {
+            return Err(io::Error::other("Maestro returned an empty result"));
+        }
+        protocol::write_result(&mut socket, &task, &result)
+    })();
+    result.map_err(|error| Failure {
+        error,
+        cleanup_confirmed,
+    })
 }
 
 #[cfg(test)]

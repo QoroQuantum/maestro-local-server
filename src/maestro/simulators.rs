@@ -185,7 +185,7 @@ mod tests_simulator {
             "Simulator is not valid, handle is zero"
         );
 
-        let res = simulator.remove_all_optimization_simulators_and_add(1, 1);
+        let res = simulator.remove_all_optimization_simulators_and_add(test_backend_id("qcsim"), 1);
         assert!(
             res,
             "remove_all_optimization_simulators_and_add returned false"
@@ -253,7 +253,7 @@ mod tests_simulator {
             "Simulator is not valid, handle is zero"
         );
 
-        let res = simulator.remove_all_optimization_simulators_and_add(1, 1);
+        let res = simulator.remove_all_optimization_simulators_and_add(test_backend_id("qcsim"), 1);
         assert!(
             res,
             "remove_all_optimization_simulators_and_add returned false"
@@ -341,4 +341,41 @@ mod tests_simulator {
             "Estimate result method is not 'matrix_product_state'"
         );
     }
+}
+
+// Native JSON buffers are always released by the library that allocated them.
+fn native_json(call: impl FnOnce() -> *mut ::std::os::raw::c_char) -> String {
+    let pointer = call();
+    if pointer.is_null() {
+        return json::object! { ok: false, error: { code: "native_failure", message: "Native API returned a null buffer" } }.dump();
+    }
+    // SAFETY: the native contract returns a NUL-terminated allocated buffer.
+    let result = unsafe { std::ffi::CStr::from_ptr(pointer) }.to_string_lossy().into_owned();
+    unsafe { FreeResult(pointer) };
+    result
+}
+
+pub fn capabilities() -> String {
+    native_json(|| unsafe { MaestroGetCapabilitiesJson() })
+}
+
+pub fn validate_request(request: &str) -> String {
+    match CString::new(request) {
+        Ok(request) => native_json(|| unsafe { MaestroValidateRequestJson(request.as_ptr()) }),
+        Err(_) => json::object! { ok: false, error: { code: "invalid_input", message: "NUL in request" } }.dump(),
+    }
+}
+
+pub fn run_request(request: &str) -> String {
+    match CString::new(request) {
+        Ok(request) => native_json(|| unsafe { MaestroRunRequestJson(request.as_ptr()) }),
+        Err(_) => json::object! { ok: false, error: { code: "invalid_input", message: "NUL in request" } }.dump(),
+    }
+}
+
+#[cfg(test)]
+pub fn test_backend_id(name: &str) -> i32 {
+    let capabilities = json::parse(&capabilities()).unwrap();
+    capabilities["backends"].members().find(|backend| backend["name"].as_str() == Some(name))
+        .unwrap()["legacy_id"].as_i32().unwrap()
 }

@@ -8,6 +8,20 @@ use std::io::{self, Read, Write};
 use crate::maestro::runner::{Task, TaskType};
 
 const VERSION: u32 = 1;
+const MAX_MESSAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+// A task is never sent until the worker has installed cancellation handlers.
+pub(super) fn write_ready(writer: &mut impl Write) -> io::Result<()> {
+    write_message(writer, json::object! {version: VERSION, ready: true})
+}
+
+pub(super) fn read_ready(reader: &mut impl Read) -> io::Result<()> {
+    let message = read_message(reader)?;
+    if message["ready"].as_bool() != Some(true) {
+        return Err(invalid("Worker did not acknowledge readiness"));
+    }
+    Ok(())
+}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -15,6 +29,9 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 pub(super) fn write_message(writer: &mut impl Write, message: json::JsonValue) -> io::Result<()> {
     let payload = message.dump();
+    if payload.len() as u64 > MAX_MESSAGE_BYTES {
+        return Err(invalid("Worker message exceeds size limit"));
+    }
     writer.write_all(&(payload.len() as u64).to_be_bytes())?;
     writer.write_all(payload.as_bytes())
 }
@@ -23,6 +40,9 @@ pub(super) fn read_message(reader: &mut impl Read) -> io::Result<json::JsonValue
     let mut header = [0; 8];
     reader.read_exact(&mut header)?;
     let length = u64::from_be_bytes(header);
+    if length > MAX_MESSAGE_BYTES {
+        return Err(invalid("Worker message exceeds size limit"));
+    }
     // Read incrementally instead of allocating an untrusted advertised length.
     let mut payload = String::new();
     reader.take(length).read_to_string(&mut payload)?;
@@ -46,7 +66,7 @@ pub(super) fn write_task(writer: &mut impl Write, task: &Task) -> io::Result<()>
             version: VERSION,
             session_id: task.session_id,
             task_id: task.task_id,
-            task_type: match task.task_type { TaskType::Execute => "execute", TaskType::Estimate => "estimate" },
+            task_type: match task.task_type { TaskType::Execute => "execute", TaskType::Estimate => "estimate", TaskType::Request => "request", TaskType::ValidateRequest => "validate_request" },
             qasm: task.qasm.as_str(),
             observables: task.observables.as_str(),
             nr_qubits: task.nr_qubits,
@@ -78,6 +98,8 @@ pub(super) fn read_task(reader: &mut impl Read) -> io::Result<Task> {
     let task_type = match message["task_type"].as_str() {
         Some("execute") => TaskType::Execute,
         Some("estimate") => TaskType::Estimate,
+        Some("request") => TaskType::Request,
+        Some("validate_request") => TaskType::ValidateRequest,
         _ => return Err(invalid("Invalid task_type")),
     };
     Ok(Task::new(
