@@ -1,28 +1,18 @@
 extern crate bindgen;
 
+mod build_config;
+
+use build_config::BuildPaths;
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=MAESTRO_DIR");
-    println!("cargo:rerun-if-env-changed=MAESTRO_LIBRARY_DIR");
-    println!("cargo:rerun-if-env-changed=MAESTRO_HEADER");
-
-    let maestro_dir = configured_path("MAESTRO_DIR");
-    let header_override = configured_path("MAESTRO_HEADER");
-    let maestro_header = header_override.clone().unwrap_or_else(|| {
-        maestro_dir
-            .as_ref()
-            .expect("Set MAESTRO_DIR to the Maestro checkout or provide MAESTRO_HEADER")
-            .join("maestrolib/Interface.h")
-    });
-    let maestro_lib_dir = configured_path("MAESTRO_LIBRARY_DIR").unwrap_or_else(|| {
-        maestro_dir
-            .as_ref()
-            .expect("Set MAESTRO_DIR to the Maestro checkout or provide MAESTRO_LIBRARY_DIR")
-            .join("build")
-    });
-    let maestro_library = maestro_lib_dir.join("libmaestro.so");
+    let paths =
+        BuildPaths::resolve(|name| env::var_os(name)).unwrap_or_else(|error| panic!("{error}"));
+    for variable in &paths.watched_env {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+    let maestro_header = paths.header;
 
     if !maestro_header.is_file() {
         panic!(
@@ -31,25 +21,42 @@ fn main() {
         );
     }
 
-    if !maestro_library.is_file() {
-        panic!(
-            "Maestro library not found at {}; set MAESTRO_DIR or MAESTRO_LIBRARY_DIR",
-            maestro_library.display()
+    let maestro_header = maestro_header
+        .canonicalize()
+        .expect("Cannot resolve Maestro header");
+    println!("cargo:rerun-if-changed={}", maestro_header.display());
+
+    if let Some(directory) = paths.library_dir {
+        let maestro_lib_dir = directory.canonicalize().unwrap_or_else(|error| {
+            panic!(
+                "Invalid Maestro library directory {}: {error}",
+                directory.display()
+            )
+        });
+        let maestro_library = maestro_lib_dir.join("libmaestro.so");
+        if !maestro_library.is_file() {
+            panic!(
+                "Maestro library not found at {}; set MAESTRO_DIR or MAESTRO_LIBRARY_DIR",
+                maestro_library.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", maestro_library.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            maestro_lib_dir.display()
         );
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            maestro_lib_dir.display()
+        );
+    } else {
+        // Preserve normal linker discovery rather than requiring one specific
+        // installed location. /usr/local was the original additional path.
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
+        println!("cargo:rustc-link-search=native=/usr/local");
     }
 
-    println!("cargo:rerun-if-changed={}", maestro_header.display());
-    println!("cargo:rerun-if-changed={}", maestro_library.display());
-    println!(
-        "cargo:rustc-link-search=native={}",
-        maestro_lib_dir.display()
-    );
-
     println!("cargo:rustc-link-lib=dylib=maestro");
-    println!(
-        "cargo:rustc-link-arg=-Wl,-rpath,{}",
-        maestro_lib_dir.display()
-    );
 
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
@@ -60,11 +67,11 @@ fn main() {
         .clang_arg(format!("-I{}", maestro_header.parent().unwrap().display()))
         // The input header we would like to generate
         // bindings for.
-        .header(
-            header_override
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "wrapper.h".into()),
-        )
+        .header(if env::var_os("MAESTRO_HEADER").is_some() {
+            maestro_header.to_string_lossy().into_owned()
+        } else {
+            "wrapper.h".into()
+        })
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -77,14 +84,4 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
-}
-
-fn configured_path(variable: &str) -> Option<PathBuf> {
-    let value = env::var_os(variable)?;
-    let path = PathBuf::from(value);
-
-    Some(
-        path.canonicalize()
-            .unwrap_or_else(|error| panic!("Invalid {variable} path {}: {error}", path.display())),
-    )
 }

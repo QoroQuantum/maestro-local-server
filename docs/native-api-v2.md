@@ -3,12 +3,18 @@
 The daemon and all workers are native Rust/C/C++. No Python interpreter is embedded
 or spawned. Legacy `SESSION`/`TASK` commands and payloads remain supported.
 Rebuild Maestro first, then this server against its updated `Interface.h` and
-library. Set `MAESTRO_DIR` to the Maestro checkout; the default inputs are
-`maestrolib/Interface.h` and `build/libmaestro.so` inside that checkout.
-`MAESTRO_HEADER` and `MAESTRO_LIBRARY_DIR` override those inputs independently.
-Setting both overrides also permits building without `MAESTRO_DIR`, for example
-with an installed header and library or a separate CMake build directory. The
-selected library directory is embedded in the binary's runtime search path.
+library. With no Maestro environment variables set, the header defaults to
+`$HOME/maestro/maestrolib/Interface.h`. Library discovery uses the normal linker
+search paths with `/usr/local/lib` and `/usr/local` added; neither directory is
+mandatory. The installed library must also be discoverable by the runtime loader.
+
+Setting `MAESTRO_DIR` selects `maestrolib/Interface.h` and `build/libmaestro.so`
+inside that checkout. `MAESTRO_HEADER` and `MAESTRO_LIBRARY_DIR` override those
+inputs independently, including without `MAESTRO_DIR`. An explicitly selected
+library directory is checked for `libmaestro.so` and embedded in the binary's
+runtime search path. Only defined Maestro environment variables are tracked for
+Cargo rebuilds. After first setting a previously unset override, clean this
+package before rebuilding; see the [build instructions](../README.md#local-development-setup).
 
 ## Protocol
 

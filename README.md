@@ -34,35 +34,54 @@ Supported commands (newline-terminated):
 
 ## Local development setup
 
-With `maestro` and `maestro-local-server` checked out next to each other:
+With the Maestro header at `~/maestro/maestrolib/Interface.h` and a matching
+`libmaestro.so` installed, no Maestro environment variables are required:
 
 ```bash
-export MAESTRO_DIR="$(realpath ../maestro)"
 cargo build --release
 sudo -u root -g users ./target/release/maestro-local-server
 ```
 
-`MAESTRO_DIR` may point to a Maestro checkout anywhere on the system. Its `build/libmaestro.so`
-location is embedded in the server binary, so `LD_LIBRARY_PATH` is not required.
+The linker uses its normal library search paths, with `/usr/local/lib` and
+`/usr/local` added. The build does not require the library to be in either of
+those directories. At runtime the library must be discoverable by the system
+loader, for example through the existing linker cache or `LD_LIBRARY_PATH`.
 
-For a separate CMake build directory, set `MAESTRO_LIBRARY_DIR` to the directory
-containing `libmaestro.so`. `MAESTRO_HEADER` can override the path to `Interface.h`.
-Both overrides take precedence over `MAESTRO_DIR`; setting both also allows builds
-without `MAESTRO_DIR`. The selected library directory is used for the runtime
-search path. Rebuild Maestro and the server together so their native API versions
-match. See [Native Maestro API v2](docs/native-api-v2.md) for the request protocol,
+Explicit paths remain available, in this order of precedence:
+
+| Input | Specific override | With `MAESTRO_DIR` set | With no override |
+| --- | --- | --- | --- |
+| Header | `MAESTRO_HEADER` | `$MAESTRO_DIR/maestrolib/Interface.h` | `$HOME/maestro/maestrolib/Interface.h` |
+| Library directory | `MAESTRO_LIBRARY_DIR` | `$MAESTRO_DIR/build` | Normal linker search, plus `/usr/local/lib` and `/usr/local` |
+
+For example, `MAESTRO_DIR=/path/to/maestro cargo build --release` builds against
+that checkout. The specific header/library overrides work independently and
+also support an installed header or a separate CMake build directory. An
+explicit library directory must contain `libmaestro.so` and is embedded in the
+server binary's runtime search path. Invalid explicit paths report an error.
+
+Cargo environment-change tracking is emitted only for defined Maestro variables.
+`HOME` is tracked only when it supplies the default header location. When setting
+a previously unset override after a successful build, use
+`cargo clean -p maestro-local-server` before rebuilding so Cargo reads the new
+setting. Changes to already tracked variables or the selected header trigger
+rebuilds normally.
+
+Rebuild Maestro and the server together so their native API versions match.
+See [Native Maestro API v2](docs/native-api-v2.md) for the request protocol,
 MPI profiles, and runtime configuration.
 
-After changing Maestro, rebuild both projects and restart the server:
+After changing Maestro, rebuild both projects and restart the server. For a
+checkout selected with `MAESTRO_DIR`:
 
 ```bash
-cd ../maestro
-cmake --build build -j8
-
-cd ../maestro-local-server
-export MAESTRO_DIR="$(realpath ../maestro)"
+export MAESTRO_DIR="$HOME/maestro"
+cmake --build "$MAESTRO_DIR/build" -j8
 cargo build --release
 ```
+
+When using normal library discovery, also update the installed library after
+rebuilding Maestro.
 
 The compiled binary is written to `target/release/maestro-local-server`.
 
