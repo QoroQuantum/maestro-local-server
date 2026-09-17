@@ -133,20 +133,14 @@ fn dispatch(
     };
     if !session.is_task_initiated(task_id)
         && !session.is_sent_to_runner(task_id)
-        && !runner.has_consumed_diagnostics(id, task_id)
+        && !runner.has_diagnostics(id, task_id)
     {
         return failure("task_not_found", "Task does not exist");
     }
-    let (logs, error) = runner.diagnostics(id, task_id);
-    let native_error = error
-        .as_deref()
-        .and_then(|message| json::parse(message).ok())
-        .map(|value| value["error"].clone())
-        .unwrap_or(json::JsonValue::Null);
-    json::object! {
-        version: VERSION, ok: true, logs: logs,
-        error: native_error, failure_message: error,
-    }
+    let mut document = runner.diagnostics(id, task_id);
+    document["version"] = VERSION.into();
+    document["ok"] = true.into();
+    document
 }
 
 pub fn handle(document: &str, manager: &Arc<SessionManager>, runner: &Arc<Runner>) -> String {
@@ -203,6 +197,63 @@ mod tests {
     }
 
     #[test]
+    fn queued_and_unsubmitted_cancellation_keeps_logs_scoped_to_session() {
+        let manager = SessionManager::new(1);
+        let runner = Runner::new();
+        let id = manager.create_session();
+        let other_id = manager.create_session();
+        let session = manager.get_session(id).unwrap();
+        let logs = |session_id: u32, task_id: u32| {
+            dispatch(
+                &json::object! {version:2, command:"logs", session_id:session_id, task_id:task_id}
+                    .dump(),
+                &manager,
+                &runner,
+            )
+        };
+        for queued in [false, true] {
+            let task = session.initiate_task();
+            if queued {
+                session.set_task_qubits(task, 1);
+                session.set_task_qasm(task, "OPENQASM 2.0; qreg q[1];".into());
+                assert_eq!(
+                    session.handle_request(vec![&task.to_string(), "EXECUTE"], Arc::clone(&runner)),
+                    "OK\n"
+                );
+                assert_eq!(logs(id, task)["events"][0]["state"], "queued");
+            }
+            assert!(session.cancel_task(Arc::clone(&runner), task).unwrap());
+            let document = logs(id, task);
+            assert_eq!(document["ok"], true);
+            assert_eq!(document["logs"], "");
+            assert_eq!(document["logs_truncated"], false);
+            assert_eq!(document["logs_omitted_bytes"], 0);
+            let states: Vec<_> = document["events"]
+                .members()
+                .map(|event| event["state"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                states,
+                if queued {
+                    vec!["queued", "cancelled"]
+                } else {
+                    vec!["cancelled"]
+                }
+            );
+            assert_eq!(logs(other_id, task)["error"]["code"], "task_not_found");
+            session.tick();
+            session.tick();
+            assert!(session.timed_out(1));
+            assert_eq!(logs(id, task)["ok"], true);
+            assert!(!session.timed_out(1));
+        }
+        assert_eq!(logs(id, u32::MAX)["error"]["code"], "task_not_found");
+        manager.remove_session(id, Arc::clone(&runner)).unwrap();
+        assert!(!runner.has_diagnostics(id, 0));
+        assert_eq!(logs(id, 0)["error"]["code"], "session_not_found");
+    }
+
+    #[test]
     fn capabilities_and_keepalive_have_versioned_envelopes() {
         let manager = SessionManager::new(1);
         let runner = Runner::new();
@@ -252,7 +303,7 @@ mod tests {
         let value = json::parse(&result.result).unwrap();
         assert!((value["expectation_values"][0].as_f64().unwrap() - 0.8).abs() < 1e-9);
         assert!((value["expectation_values"][1].as_f64().unwrap() - 0.36).abs() < 1e-9);
-        assert!(runner.has_consumed_diagnostics(id, task));
+        assert!(runner.has_diagnostics(id, task));
         let logs = dispatch(
             &json::object! {version:2,command:"logs",session_id:id,task_id:task}.dump(),
             &manager,
@@ -260,7 +311,7 @@ mod tests {
         );
         assert_eq!(logs["ok"].as_bool(), Some(true));
         runner.clear_session_diagnostics(id);
-        assert!(!runner.has_consumed_diagnostics(id, task));
+        assert!(!runner.has_diagnostics(id, task));
         runner.stop().unwrap();
         thread.join().unwrap();
     }

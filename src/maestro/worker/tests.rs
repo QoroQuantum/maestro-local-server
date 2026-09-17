@@ -83,6 +83,28 @@ fn serve_test_worker() -> io::Result<()> {
     if let Some(requested) = task.qasm.strip_prefix("test:") {
         mode = requested.to_owned();
     }
+    if let Some(requested) = json::parse(&task.qasm)
+        .ok()
+        .and_then(|value| value["test_worker"].as_str().map(str::to_owned))
+    {
+        mode = requested;
+    }
+    if mode == "logs_on_cancel" || mode == "logs_on_cancel_failure" {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(libc::SIGTERM, Arc::clone(&cancelled))?;
+        eprintln!("Worker ready for cancellation");
+        while !cancelled.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
+        eprintln!(
+            "{}\nFinal output during cancellation",
+            "x".repeat(128 * 1024)
+        );
+        if mode == "logs_on_cancel_failure" {
+            return Err(io::Error::other("Cleanup could not be confirmed"));
+        }
+        return Ok(());
+    }
     if mode == "hang" {
         hang();
     }
@@ -97,7 +119,10 @@ fn serve_test_worker() -> io::Result<()> {
     let result = match mode.as_str() {
         "malformed" => "not JSON".to_owned(),
         "flood" => {
-            eprint!("{}", "x".repeat(256 * 1024));
+            eprint!(
+                "Startup diagnostic\n{}\nLate failure diagnostic\n",
+                "x".repeat(256 * 1024)
+            );
             r#"{"counts":{"0":1}}"#.into()
         }
         "large" => json::object! {data: "x".repeat(2 * 1024 * 1024)}.dump(),
@@ -248,6 +273,8 @@ fn result_socket_handles_logs_and_results_larger_than_socket_buffer() {
             assert_eq!(result["data"].as_str().unwrap().len(), 2 * 1024 * 1024);
         } else {
             assert_eq!(result["counts"]["0"].as_u32(), Some(1));
+            assert!(execution.logs().contains("Native diagnostic on stdout"));
+            assert!(execution.logs().contains("Native diagnostic on stderr"));
         }
         assert!(execution.process.lock().unwrap().child.is_none());
     }
@@ -287,7 +314,19 @@ fn log_capture_is_bounded_and_frames_reject_oversized_lengths() {
         execute_with_command(&task("unused"), &execution, command("flood")),
         Outcome::Completed(_)
     ));
-    assert_eq!(execution.logs().len(), 64 * 1024);
+    let mut record = diagnostics::TaskDiagnostics::new(json::object! {});
+    record.output = Arc::clone(&execution.logs);
+    let document = record.document(1, 1);
+    assert_eq!(document["logs_truncated"], true);
+    assert!(document["logs_omitted_bytes"].as_u64().unwrap() > 0);
+    assert!(execution.logs().contains("Startup diagnostic"));
+    assert!(execution.logs().contains("Late failure diagnostic"));
+    assert!(
+        execution
+            .logs()
+            .contains("[... Maestro log output truncated ...]")
+    );
+    assert!(execution.logs().len() < 64 * 1024 + 100);
     let header = (64 * 1024 * 1024 + 1u64).to_be_bytes();
     assert!(protocol::read_message(&mut &header[..]).is_err());
 }

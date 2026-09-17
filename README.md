@@ -85,6 +85,25 @@ rebuilding Maestro.
 
 The compiled binary is written to `target/release/maestro-local-server`.
 
+### Formatting and linting
+
+Before submitting changes, run both checks and resolve all formatting issues,
+warnings, and errors:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+To apply Rust formatting fixes, run:
+
+```bash
+cargo fmt --all --
+```
+
+Then rerun both checks. Clippy uses the same Maestro header and library
+configuration as `cargo build`.
+
 ## Testing
 
 Tests exercise the Unix socket server, worker processes, and native simulation end-to-end.

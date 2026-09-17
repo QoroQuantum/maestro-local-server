@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use super::diagnostics::{self, TaskDiagnostics};
 use crate::maestro;
 
 #[derive(Debug)]
@@ -89,7 +90,6 @@ pub struct TaskResult {
     pub task_id: u32,
     pub result: String,
     pub error: Option<String>,
-    pub logs: String,
 }
 
 impl TaskResult {
@@ -99,12 +99,11 @@ impl TaskResult {
             task_id,
             result,
             error: None,
-            logs: String::new(),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ActiveTask {
     session_id: u32,
     task_id: u32,
@@ -115,9 +114,10 @@ struct ActiveTask {
 pub struct Runner {
     tasks_queue: Mutex<VecDeque<Task>>,
     results_map: Mutex<HashMap<u64, TaskResult>>,
-    consumed_diagnostics: Mutex<HashMap<u64, (String, Option<String>)>>,
+    task_diagnostics: Mutex<HashMap<u64, TaskDiagnostics>>,
     stop: AtomicBool,
-    // Lock order: tasks_queue -> active_task -> results_map. Register a task
+    // Lock order: tasks_queue -> active_task -> results_map -> task_diagnostics.
+    // Diagnostic output locks come last. Register a task
     // before releasing the queue lock, including while its worker is starting.
     active_task: Mutex<Option<ActiveTask>>,
 }
@@ -133,7 +133,7 @@ impl Runner {
         let myself = Self {
             tasks_queue: tasks_mutex,
             results_map: results_mutex,
-            consumed_diagnostics: Mutex::new(HashMap::new()),
+            task_diagnostics: Mutex::new(HashMap::new()),
             stop: std::sync::atomic::AtomicBool::new(false),
             active_task: Mutex::new(None),
         };
@@ -153,7 +153,15 @@ impl Runner {
                     }
                     queue.pop_front().map(|task| {
                         let execution = Arc::new(maestro::worker::Execution::new());
-                        *runner.active_task.lock().unwrap() = Some(ActiveTask {
+                        let mut active = runner.active_task.lock().unwrap();
+                        let mut records = runner.task_diagnostics.lock().unwrap();
+                        if let Some(record) =
+                            records.get_mut(&task_key(task.session_id, task.task_id))
+                        {
+                            record.output = Arc::clone(&execution.logs);
+                            record.event("started");
+                        }
+                        *active = Some(ActiveTask {
                             session_id: task.session_id,
                             task_id: task.task_id,
                             execution: Arc::clone(&execution),
@@ -163,8 +171,6 @@ impl Runner {
                 };
 
                 if let Some((task, execution)) = task_opt {
-                    // Previous in-process execution, retained for comparison:
-                    // let result = task.execute();
                     let outcome = maestro::worker::execute(&task, &execution);
                     runner.finish_task(&task, &execution, outcome);
                 } else {
@@ -184,6 +190,16 @@ impl Runner {
         outcome: maestro::worker::Outcome,
     ) {
         let mut active = self.active_task.lock().unwrap();
+        let key = task_key(task.session_id, task.task_id);
+        // Even after cancellation cleared the active slot, the worker may have
+        // a structured cleanup failure to preserve. Never recreate a record
+        // after session cleanup removed it.
+        if execution.is_cancelled()
+            && let maestro::worker::Outcome::Failed(error) = &outcome
+            && let Some(record) = self.task_diagnostics.lock().unwrap().get_mut(&key)
+        {
+            record.error = Some(error.to_string());
+        }
         if !active
             .as_ref()
             .is_some_and(|active| Arc::ptr_eq(&active.execution, execution))
@@ -209,11 +225,16 @@ impl Runner {
             if let Some(result) = result {
                 let mut record = TaskResult::new(task.session_id, task.task_id, result);
                 record.error = failure;
-                record.logs = execution.logs();
-                self.results_map
-                    .lock()
-                    .unwrap()
-                    .insert((task.session_id as u64) << 32 | task.task_id as u64, record);
+                let mut results = self.results_map.lock().unwrap();
+                if let Some(diagnostic) = self.task_diagnostics.lock().unwrap().get_mut(&key) {
+                    diagnostic.event(if record.error.is_some() {
+                        "failed"
+                    } else {
+                        "completed"
+                    });
+                    diagnostic.error = record.error.clone();
+                }
+                results.insert(key, record);
             }
         }
         *active = None;
@@ -223,11 +244,13 @@ impl Runner {
         let execution = {
             let mut queue = self.tasks_queue.lock().unwrap();
             self.stop.store(true, Ordering::SeqCst);
-            queue.clear();
+            for task in queue.drain(..) {
+                self.mark_cancelled(task.session_id, task.task_id);
+            }
             let active = self.active_task.lock().unwrap();
             active.as_ref().map(|active| {
                 active.execution.request_cancel();
-                Arc::clone(&active.execution)
+                active.clone()
             })
         };
         self.cancel_execution(execution)
@@ -238,6 +261,12 @@ impl Runner {
         if self.stop.load(Ordering::SeqCst) {
             return false;
         }
+        let mut diagnostic = TaskDiagnostics::new(diagnostics::task_context(&task));
+        diagnostic.event("queued");
+        self.task_diagnostics
+            .lock()
+            .unwrap()
+            .insert(task_key(task.session_id, task.task_id), diagnostic);
         queue.push_back(task);
         true
     }
@@ -255,49 +284,29 @@ impl Runner {
     }
 
     pub fn get_result(&self, session_id: u32, task_id: u32) -> Option<TaskResult> {
-        let mut results = self.results_map.lock().unwrap();
-
-        let key = (session_id as u64) << 32 | task_id as u64;
-        let result = results.remove(&key);
-        if let Some(record) = result.as_ref() {
-            self.consumed_diagnostics
-                .lock()
-                .unwrap()
-                .insert(key, (record.logs.clone(), record.error.clone()));
-        }
-        result
+        self.results_map
+            .lock()
+            .unwrap()
+            .remove(&task_key(session_id, task_id))
     }
 
-    pub fn diagnostics(&self, session_id: u32, task_id: u32) -> (String, Option<String>) {
-        let active = self.active_task.lock().unwrap();
-        if let Some(active) = active
-            .as_ref()
-            .filter(|a| a.session_id == session_id && a.task_id == task_id)
-        {
-            return (active.execution.logs(), None);
-        }
-        let results = self.results_map.lock().unwrap();
-        results
-            .get(&((session_id as u64) << 32 | task_id as u64))
-            .map(|r| (r.logs.clone(), r.error.clone()))
-            .or_else(|| {
-                self.consumed_diagnostics
-                    .lock()
-                    .unwrap()
-                    .get(&((session_id as u64) << 32 | task_id as u64))
-                    .cloned()
-            })
-            .unwrap_or_default()
+    pub fn diagnostics(&self, session_id: u32, task_id: u32) -> json::JsonValue {
+        self.task_diagnostics
+            .lock()
+            .unwrap()
+            .get(&task_key(session_id, task_id))
+            .map(|record| record.document(session_id, task_id))
+            .unwrap_or_else(|| TaskDiagnostics::default().document(session_id, task_id))
     }
 
-    pub fn has_consumed_diagnostics(&self, session_id: u32, task_id: u32) -> bool {
-        self.consumed_diagnostics
+    pub fn has_diagnostics(&self, session_id: u32, task_id: u32) -> bool {
+        self.task_diagnostics
             .lock()
             .unwrap()
             .contains_key(&((session_id as u64) << 32 | task_id as u64))
     }
     pub fn clear_session_diagnostics(&self, session_id: u32) {
-        self.consumed_diagnostics
+        self.task_diagnostics
             .lock()
             .unwrap()
             .retain(|key, _| (*key >> 32) as u32 != session_id);
@@ -314,6 +323,9 @@ impl Runner {
     pub fn remove_task(&self, session_id: u32, task_id: u32) -> std::io::Result<()> {
         let execution = {
             let mut queue = self.tasks_queue.lock().unwrap();
+            let queued = queue
+                .iter()
+                .any(|task| task.session_id == session_id && task.task_id == task_id);
             queue.retain(|task| !(task.session_id == session_id && task.task_id == task_id));
             let active = self.active_task.lock().unwrap();
             let execution = active
@@ -321,34 +333,82 @@ impl Runner {
                 .filter(|active| active.session_id == session_id && active.task_id == task_id)
                 .map(|active| {
                     active.execution.request_cancel();
-                    Arc::clone(&active.execution)
+                    active.clone()
                 });
             self.results_map
                 .lock()
                 .unwrap()
                 .remove(&((session_id as u64) << 32 | task_id as u64));
+            if queued {
+                self.mark_cancelled(session_id, task_id);
+            }
             execution
         };
         // Process termination and reaping never hold the queue or result locks.
         self.cancel_execution(execution)
     }
 
-    fn cancel_execution(
-        &self,
-        execution: Option<Arc<maestro::worker::Execution>>,
-    ) -> std::io::Result<()> {
-        if let Some(execution) = execution {
-            execution.cancel_and_wait()?;
+    fn cancel_execution(&self, execution: Option<ActiveTask>) -> std::io::Result<()> {
+        if let Some(task) = execution {
+            let result = task.execution.cancel_and_wait();
             let mut active = self.active_task.lock().unwrap();
-            if active
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(&active.execution, &execution))
+            if let Some(record) = self
+                .task_diagnostics
+                .lock()
+                .unwrap()
+                .get_mut(&task_key(task.session_id, task.task_id))
+            {
+                match &result {
+                    Ok(()) => record.event("cancelled"),
+                    Err(error) => {
+                        let earlier = record.error.clone().map(std::io::Error::other);
+                        record.error = Some(
+                            diagnostics::with_causes(
+                                std::io::Error::new(error.kind(), error.to_string()),
+                                "cleanup_unconfirmed",
+                                &earlier.as_ref().into_iter().collect::<Vec<_>>(),
+                            )
+                            .to_string(),
+                        );
+                        record.event("cancellation_failed");
+                    }
+                }
+            }
+            if result.is_ok()
+                && active
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(&active.execution, &task.execution))
             {
                 *active = None;
             }
+            return result;
         }
         Ok(())
     }
+
+    fn mark_cancelled(&self, session_id: u32, task_id: u32) {
+        if let Some(record) = self
+            .task_diagnostics
+            .lock()
+            .unwrap()
+            .get_mut(&task_key(session_id, task_id))
+        {
+            record.event("cancelled");
+        }
+    }
+
+    pub fn record_unsubmitted_cancellation(&self, session_id: u32, task_id: u32) {
+        let mut record = TaskDiagnostics::default();
+        record.event("cancelled");
+        self.task_diagnostics
+            .lock()
+            .unwrap()
+            .insert(task_key(session_id, task_id), record);
+    }
+}
+
+fn task_key(session_id: u32, task_id: u32) -> u64 {
+    (session_id as u64) << 32 | task_id as u64
 }
 
 #[cfg(test)]

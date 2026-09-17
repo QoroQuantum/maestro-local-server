@@ -257,13 +257,17 @@ impl Session {
             sent_to_runner.remove(&task_id);
             Ok(true)
         } else {
-            // might be in 'initiated_tasks' but not yet sent to runner, so remove it from there
-            Ok(self
+            // An unsubmitted task has no worker output, but still records cancellation.
+            let removed = self
                 .initiated_tasks
                 .lock()
                 .unwrap()
                 .remove(&task_id)
-                .is_some())
+                .is_some();
+            if removed {
+                runner.record_unsubmitted_cancellation(self.get_id(), task_id);
+            }
+            Ok(removed)
         }
     }
 

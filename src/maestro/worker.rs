@@ -77,7 +77,9 @@ struct Process {
 pub struct Execution {
     cancelled: AtomicBool,
     process: Mutex<Process>,
-    logs: Arc<Mutex<Vec<u8>>>,
+    pub(super) logs: Arc<Mutex<diagnostics::CapturedOutput>>,
+    stop_logs: Arc<AtomicBool>,
+    log_threads: Mutex<Vec<thread::JoinHandle<()>>>,
     // Lets regression tests cancel at a specific blocking operation, rather
     // than accidentally cancelling every test before the worker has started.
     #[cfg(test)]
@@ -96,7 +98,7 @@ impl Execution {
     }
 
     pub fn logs(&self) -> String {
-        String::from_utf8_lossy(&self.logs.lock().unwrap()).into_owned()
+        self.logs.lock().unwrap().text()
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -107,7 +109,18 @@ impl Execution {
     /// arriving before spawn is latched, preventing the child from starting.
     pub fn cancel_and_wait(&self) -> io::Result<()> {
         self.request_cancel();
-        terminate(&mut self.process.lock().unwrap())
+        terminate(&mut self.process.lock().unwrap())?;
+        self.finish_logs();
+        Ok(())
+    }
+
+    fn finish_logs(&self) {
+        self.stop_logs.store(true, Ordering::SeqCst);
+        // Both normal completion and cancellation wait for the same readers.
+        // Never hold the process lock here: spawning registers them under it.
+        for reader in self.log_threads.lock().unwrap().drain(..) {
+            let _ = reader.join();
+        }
     }
 
     fn wait(&self) -> io::Result<ExitStatus> {
@@ -300,8 +313,6 @@ fn validate_with_command(request: &str, command: Command) -> io::Result<String> 
 }
 
 fn execute_with_command(task: &Task, execution: &Execution, mut command: Command) -> Outcome {
-    let stop_logs = Arc::new(AtomicBool::new(false));
-    let mut log_threads = Vec::new();
     let result = (|| {
         let (mut socket, child_socket) = UnixStream::pair()?;
         command
@@ -321,18 +332,19 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
                 && json::parse(&task.qasm).is_ok_and(|value| value["launch"].is_object());
             process.socket = Some(socket.try_clone()?);
             let mut child = command.spawn()?;
+            let mut log_threads = execution.log_threads.lock().unwrap();
             if let Some(stdout) = child.stdout.take() {
                 log_threads.push(drain_log(
                     stdout,
                     Arc::clone(&execution.logs),
-                    Arc::clone(&stop_logs),
+                    Arc::clone(&execution.stop_logs),
                 ));
             }
             if let Some(stderr) = child.stderr.take() {
                 log_threads.push(drain_log(
                     stderr,
                     Arc::clone(&execution.logs),
-                    Arc::clone(&stop_logs),
+                    Arc::clone(&execution.stop_logs),
                 ));
             }
             process.child = Some(child);
@@ -391,10 +403,7 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
     // Protocol failures must also stop and reap the worker (it may still be
     // running). Successful executions have already been reaped by wait().
     let cleanup = terminate(&mut execution.process.lock().unwrap());
-    stop_logs.store(true, Ordering::SeqCst);
-    for reader in log_threads {
-        let _ = reader.join();
-    }
+    execution.finish_logs();
     if let Err(error) = cleanup {
         return Outcome::Failed(diagnostics::with_causes(
             error,
@@ -412,11 +421,11 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
     }
 }
 
-// Drain pipes concurrently and keep a bounded prefix. Nonblocking reads let
+// Drain pipes concurrently and keep a bounded prefix and tail. Nonblocking reads let
 // cleanup finish even if a native descendant inherited a log descriptor.
 fn drain_log<T: Read + AsRawFd + Send + 'static>(
     mut pipe: T,
-    logs: Arc<Mutex<Vec<u8>>>,
+    logs: Arc<Mutex<diagnostics::CapturedOutput>>,
     stop: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -430,9 +439,7 @@ fn drain_log<T: Read + AsRawFd + Send + 'static>(
             match pipe.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    let mut output = logs.lock().unwrap();
-                    let remaining = (64 * 1024usize).saturating_sub(output.len());
-                    output.extend_from_slice(&buffer[..count.min(remaining)]);
+                    logs.lock().unwrap().append(&buffer[..count]);
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if stop.load(Ordering::SeqCst) {

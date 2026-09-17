@@ -23,8 +23,7 @@ Implementation plan:
 - `tests/worker_cli.rs`: tests the actual production `--worker` entry point.
 
 `Task::execute()` still contains the native implementation. Only worker mode
-calls it. The runner's old direct call is retained as a comment next to
-`worker::execute(&task, &execution)`.
+calls it, through `worker::execute(&task, &execution)` in the runner.
 
 ## Process and protocol
 
@@ -61,7 +60,8 @@ available even after a result arrives if the worker hangs during cleanup.
 Queue and result locks are released before termination. Result publication and
 the cancellation flag are ordered by the active-task lock. After cancellation
 wins, no buffered result can be published. `CANCEL` returns `OK YES` only after
-the child is reaped (or before spawn when no child can subsequently be created).
+the child is reaped and its output readers have drained (or before spawn when no
+child can subsequently be created).
 Termination errors are returned as `ERROR` instead of reporting success.
 
 Session deletion and expiration close the session to further submissions,
@@ -72,6 +72,14 @@ The public socket protocol remains compatible with the existing QRMI client.
 Cancelled tasks have no pending/running/result state. Existing result consumption
 and completed-task removal semantics remain unchanged; this does not introduce
 a persistent task-status API.
+
+The runner stores diagnostics independently of execution/result state. Each
+record shares the worker's bounded output buffer and records task lifecycle
+events. Result consumption and cancellation preserve these records; session
+cleanup deletes them. Late worker completion can update an existing diagnostic
+record but cannot recreate one after session cleanup. Output retains a 32 KiB
+prefix and 32 KiB tail, with explicit truncation metadata; see the
+[public diagnostic contract](native-api-v2.md#protocol).
 
 Process groups cover local descendants that stay in the group. A backend that
 launches remote jobs or moves descendants to another group needs backend-specific

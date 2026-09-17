@@ -46,9 +46,46 @@ Capabilities contain the native operation/backend/method/option/noise catalog,
 server commands, lease duration, transport bound, and configured MPI profile names
 and prerequisites. Compiled plugin support is distinct from runtime readiness.
 Diagnostics contain bounded stdout/stderr, `failure_message`, and the structured
-native error when available. Output capture retains a 64 KiB prefix. Diagnostics
-remain available after successful result consumption until session deletion/expiry.
-Clients should fetch logs before discarding the acquisition token.
+native error when available. They remain available after result consumption and
+successful cancellation, until session deletion/expiry or daemon restart. This
+includes queued and unsubmitted tasks cancelled before a worker starts. Reading
+retained logs also renews the session lease. Clients should fetch logs before
+discarding the acquisition token.
+
+The `logs` string combines stdout and stderr in capture order; ordering between
+the two streams is not guaranteed. Capture keeps the first 32 KiB and most recent
+32 KiB of raw output. Up to 64 KiB, output is unchanged. Once output is omitted,
+the retained pieces are separated by `\n[... Maestro log output truncated ...]\n`,
+`logs_truncated` is `true`, and `logs_omitted_bytes` counts discarded raw bytes.
+Otherwise these fields are `false` and `0`. Output uses lossy UTF-8 decoding, so
+invalid bytes or partial characters at a truncation boundary become replacement
+characters; the text marker and decoding can make the returned string larger
+than 64 KiB. Readers continue draining full pipes even after reaching the limit.
+Successful cancellation waits for the child to exit and for capture to drain.
+
+Additional diagnostic fields are additive within API v2:
+
+- `session_id` and `task_id` identify the record.
+- `events` is an ordered array of `{timestamp_unix_ms, state}` objects. Submitted
+  tasks record `queued`, then `started` when dequeued for worker startup, and
+  `completed`, `failed`, or `cancelled`. A queued cancellation has no `started`
+  event; an unsubmitted cancellation has only `cancelled`. An unsuccessful
+  cancellation records `cancellation_failed` and retains the cleanup error.
+  These are server-observed lifecycle events, not native progress notifications.
+  Timestamps are Unix UTC milliseconds; array order defines transition order
+  even if the wall clock is adjusted. Repeated adjacent states are suppressed.
+  History retains at most eight events, keeping the first and the latest seven;
+  `events_truncated` indicates omitted events.
+- `context` contains requested operation, simulator backend/method, and MPI
+  launch profile/ranks when supplied. Legacy tasks use `simulator.type_id` and
+  `simulator.method_id`. String identifiers are capped at 256 UTF-8 bytes plus
+  a truncation marker. Circuits, arbitrary options, and launcher commands are
+  excluded. Omitted automatic selections are not resolved here; effective native
+  execution metadata remains in the task result.
+
+`ok:true` means log retrieval succeeded, including for a failed or cancelled task.
+Cancelled tasks still have no legacy result/status record; retained diagnostics
+do not change `TASK EXISTS`, `GET_RESULTS`, or cancellation acknowledgement rules.
 
 When execution/protocol handling and cleanup both fail, diagnostics retain both.
 The primary error has `code:"cleanup_unconfirmed"` and `cleanup_confirmed:false`;

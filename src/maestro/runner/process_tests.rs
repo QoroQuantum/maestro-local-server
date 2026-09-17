@@ -19,8 +19,10 @@ impl RunningRunner {
 
 impl Drop for RunningRunner {
     fn drop(&mut self) {
-        self.runner.stop().unwrap();
-        self.thread.take().unwrap().join().unwrap();
+        if let Some(thread) = self.thread.take() {
+            self.runner.stop().unwrap();
+            thread.join().unwrap();
+        }
     }
 }
 
@@ -91,6 +93,142 @@ fn running_task_cancellation_allows_next_task_to_complete() {
     assert!(!runner.get_result(1, next).unwrap().result.is_empty());
 }
 
+fn event_states(document: &json::JsonValue) -> Vec<&str> {
+    document["events"]
+        .members()
+        .map(|event| {
+            assert!(event["timestamp_unix_ms"].as_u64().unwrap() > 0);
+            event["state"].as_str().unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn cancelled_task_logs_include_shutdown_output_and_survive_until_session_cleanup() {
+    let running = RunningRunner::new();
+    let runner = &running.runner;
+    let manager = maestro::sessions::SessionManager::new(100);
+    let id = manager.create_session();
+    let session = manager.get_session(id).unwrap();
+    let task = session
+        .submit_request(
+            json::object! {
+                test_worker: "logs_on_cancel", operation: "execute",
+                simulator: {backend: "gpu", method: "statevector"},
+                launch: {profile: "test", ranks: 2},
+            }
+            .dump(),
+            runner,
+        )
+        .unwrap();
+    wait_until(|| {
+        runner.diagnostics(id, task)["logs"]
+            .as_str()
+            .unwrap()
+            .contains("Worker ready for cancellation")
+    });
+    assert_eq!(
+        event_states(&runner.diagnostics(id, task)),
+        ["queued", "started"]
+    );
+    assert!(session.cancel_task(Arc::clone(runner), task).unwrap());
+    let response = maestro::api::handle(
+        &json::object! {version:2, command:"logs", session_id:id, task_id:task}.dump(),
+        &manager,
+        runner,
+    );
+    let document = json::parse(response.strip_prefix("OK ").unwrap().trim()).unwrap();
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["session_id"], id);
+    assert_eq!(document["task_id"], task);
+    assert_eq!(event_states(&document), ["queued", "started", "cancelled"]);
+    assert!(
+        document["logs"]
+            .as_str()
+            .unwrap()
+            .contains("Final output during cancellation")
+    );
+    assert!(
+        document["logs"]
+            .as_str()
+            .unwrap()
+            .contains("Worker ready for cancellation")
+    );
+    assert_eq!(document["logs_truncated"], true);
+    assert_eq!(document["context"]["simulator"]["backend"], "gpu");
+    assert_eq!(document["context"]["launch"]["profile"], "test");
+    assert!(document["error"].is_null());
+    assert!(!runner.is_task_result_available(id, task));
+    assert!(manager.remove_session(id, Arc::clone(runner)).unwrap());
+    // Wait for another task to finish so any late publication has also run.
+    let other = Session::new(id + 1);
+    let next = submit(&other, runner, SIMPLE_QASM);
+    wait_until(|| runner.is_task_result_available(id + 1, next));
+    assert!(!runner.has_diagnostics(id, task));
+}
+
+#[test]
+fn failed_cancellation_retains_cleanup_error_without_a_success_event() {
+    let mut running = RunningRunner::new();
+    let runner = &running.runner;
+    let session = Session::new(1);
+    let task = session
+        .submit_request(
+            json::object! {
+                test_worker: "logs_on_cancel_failure", launch: {profile: "test", ranks: 2},
+            }
+            .dump(),
+            runner,
+        )
+        .unwrap();
+    wait_until(|| {
+        runner.diagnostics(1, task)["logs"]
+            .as_str()
+            .unwrap()
+            .contains("Worker ready for cancellation")
+    });
+    let cancelled = session.cancel_task(Arc::clone(runner), task);
+    // The worker has exited, but intentionally did not confirm remote cleanup.
+    // Stop/join before assertions; the normal guard requires successful cleanup.
+    let _ = runner.stop();
+    running.thread.take().unwrap().join().unwrap();
+    assert!(cancelled.is_err());
+    let document = runner.diagnostics(1, task);
+    assert_eq!(
+        event_states(&document),
+        ["queued", "started", "cancellation_failed"]
+    );
+    assert_eq!(document["error"]["code"], "cleanup_unconfirmed");
+    assert_eq!(document["error"]["cleanup_confirmed"], false);
+    assert!(
+        document["logs"]
+            .as_str()
+            .unwrap()
+            .contains("Final output during cancellation")
+    );
+    assert!(session.is_sent_to_runner(task));
+}
+
+#[test]
+fn completed_and_failed_task_history_survives_result_consumption() {
+    let running = RunningRunner::new();
+    let runner = &running.runner;
+    let session = Session::new(1);
+    for (input, state) in [("test:logs", "completed"), ("test:malformed", "failed")] {
+        let task = submit(&session, runner, input);
+        wait_until(|| runner.is_task_result_available(1, task));
+        let before = runner.diagnostics(1, task);
+        assert_eq!(event_states(&before), ["queued", "started", state]);
+        assert_eq!(before["events_truncated"], false);
+        assert_eq!(before["logs_truncated"], false);
+        assert_eq!(before["context"]["operation"], "execute");
+        assert_eq!(before["context"]["simulator"]["type_id"], 1);
+        assert_eq!(before["failure_message"].is_null(), state == "completed");
+        assert!(runner.get_result(1, task).is_some());
+        assert_eq!(runner.diagnostics(1, task), before);
+    }
+}
+
 #[test]
 fn shutdown_terminates_active_worker_and_rejects_more_work() {
     let running = RunningRunner::new();
@@ -127,6 +265,8 @@ fn session_deletion_and_expiration_cancel_workers_and_close_retained_sessions() 
         assert!(!runner.is_running(id, active));
         assert!(!runner.is_task_result_available(id, active));
         assert!(!runner.is_task_result_available(id, queued));
+        assert!(!runner.has_diagnostics(id, active));
+        assert!(!runner.has_diagnostics(id, queued));
         assert!(runner.tasks_queue.lock().unwrap().is_empty());
         assert_eq!(
             session.handle_request(vec![&queued.to_string(), "EXECUTE"], Arc::clone(runner)),
@@ -136,6 +276,7 @@ fn session_deletion_and_expiration_cancel_workers_and_close_retained_sessions() 
         let other = submit(&other_session, runner, SIMPLE_QASM);
         wait_until(|| runner.is_task_result_available(id + 1, other));
         assert!(!runner.is_task_result_failed(id + 1, other));
+        assert!(!runner.has_diagnostics(id, active));
     }
 }
 
