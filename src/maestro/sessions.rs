@@ -91,11 +91,24 @@ impl Session {
 
     pub fn submit_request(&self, request: String, runner: &runner::Runner) -> Result<u32, String> {
         let mut sent = self.sent_to_runner.lock().unwrap();
-        if self.closed.load(Ordering::SeqCst) { return Err("Session is closed".into()); }
+        if self.closed.load(Ordering::SeqCst) {
+            return Err("Session is closed".into());
+        }
         let id = self.task_counter.fetch_add(1, Ordering::SeqCst);
-        let task = runner::Task::new(self.get_id(), id, runner::TaskType::Request,
-            request, String::new(), 0, 0, 0, String::new());
-        if !runner.add_task(task) { return Err("Runner is stopping".into()); }
+        let task = runner::Task::new(
+            self.get_id(),
+            id,
+            runner::TaskType::Request,
+            request,
+            String::new(),
+            0,
+            0,
+            0,
+            String::new(),
+        );
+        if !runner.add_task(task) {
+            return Err("Runner is stopping".into());
+        }
         sent.insert(id);
         self.reset_timer();
         Ok(id)
@@ -265,7 +278,9 @@ impl Session {
             return String::from("ERROR Session is closed\n");
         }
         self.reset_timer();
-        if request.is_empty() { return "ERROR Missing task command\n".into(); }
+        if request.is_empty() {
+            return "ERROR Missing task command\n".into();
+        }
 
         if request[0] == "CREATE" {
             let task_id = self.initiate_task();
@@ -280,7 +295,9 @@ impl Session {
 
         let task_id = task_id.unwrap();
 
-        if request.len() < 2 { return "ERROR Missing task command\n".into(); }
+        if request.len() < 2 {
+            return "ERROR Missing task command\n".into();
+        }
         let task_command = request[1];
 
         //eprintln!("Session {}: Handling task command: {} for task ID: {}", self.get_id(), task_command, task_id);

@@ -479,21 +479,21 @@ fn run_profile_tracked(
                     libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM);
                 }
             }
-            if stop.is_none() {
-                if let Some(input) = stdin.as_mut() {
-                    match input.write(&request.as_bytes()[written..]) {
-                        Ok(size) => {
-                            written += size;
-                            if written == request.len() {
-                                stdin.take();
-                            }
+            if stop.is_none()
+                && let Some(input) = stdin.as_mut()
+            {
+                match input.write(&request.as_bytes()[written..]) {
+                    Ok(size) => {
+                        written += size;
+                        if written == request.len() {
+                            stdin.take();
                         }
-                        Err(error)
-                            if error.kind() == io::ErrorKind::WouldBlock
-                                || error.kind() == io::ErrorKind::Interrupted => {}
-                        Err(error) => {
-                            stop = Some(error);
-                        }
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        stop = Some(error);
                     }
                 }
             }
@@ -553,16 +553,19 @@ fn run_profile_tracked(
             }
             // A step marker may arrive in the same poll as cancellation. Consume
             // stdout before deciding whether explicit Slurm cancellation is possible.
-            if termination_sent && !step_cancelled && exited.is_none() && profile.kind == "srun" {
-                if let Some(step) = step.as_deref() {
-                    step_cancelled = true;
-                    cleanup_error = cancel_step(profile, step).err();
-                }
+            if termination_sent
+                && !step_cancelled
+                && exited.is_none()
+                && profile.kind == "srun"
+                && let Some(step) = step.as_deref()
+            {
+                step_cancelled = true;
+                cleanup_error = cancel_step(profile, step).err();
             }
-            if exited.is_none() {
-                if let Some(status) = child.0.try_wait()? {
-                    exited = Some((status, Instant::now()));
-                }
+            if exited.is_none()
+                && let Some(status) = child.0.try_wait()?
+            {
+                exited = Some((status, Instant::now()));
             }
             if let Some((status, time)) = exited {
                 if let Some(error) = cleanup_error {

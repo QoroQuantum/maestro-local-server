@@ -210,10 +210,10 @@ impl Runner {
                 let mut record = TaskResult::new(task.session_id, task.task_id, result);
                 record.error = failure;
                 record.logs = execution.logs();
-                self.results_map.lock().unwrap().insert(
-                    (task.session_id as u64) << 32 | task.task_id as u64,
-                    record,
-                );
+                self.results_map
+                    .lock()
+                    .unwrap()
+                    .insert((task.session_id as u64) << 32 | task.task_id as u64, record);
             }
         }
         *active = None;
@@ -260,28 +260,47 @@ impl Runner {
         let key = (session_id as u64) << 32 | task_id as u64;
         let result = results.remove(&key);
         if let Some(record) = result.as_ref() {
-            self.consumed_diagnostics.lock().unwrap().insert(key, (record.logs.clone(), record.error.clone()));
+            self.consumed_diagnostics
+                .lock()
+                .unwrap()
+                .insert(key, (record.logs.clone(), record.error.clone()));
         }
         result
     }
 
     pub fn diagnostics(&self, session_id: u32, task_id: u32) -> (String, Option<String>) {
         let active = self.active_task.lock().unwrap();
-        if let Some(active) = active.as_ref().filter(|a| a.session_id == session_id && a.task_id == task_id) {
+        if let Some(active) = active
+            .as_ref()
+            .filter(|a| a.session_id == session_id && a.task_id == task_id)
+        {
             return (active.execution.logs(), None);
         }
         let results = self.results_map.lock().unwrap();
-        results.get(&((session_id as u64) << 32 | task_id as u64))
+        results
+            .get(&((session_id as u64) << 32 | task_id as u64))
             .map(|r| (r.logs.clone(), r.error.clone()))
-            .or_else(|| self.consumed_diagnostics.lock().unwrap().get(&((session_id as u64) << 32 | task_id as u64)).cloned())
+            .or_else(|| {
+                self.consumed_diagnostics
+                    .lock()
+                    .unwrap()
+                    .get(&((session_id as u64) << 32 | task_id as u64))
+                    .cloned()
+            })
             .unwrap_or_default()
     }
 
     pub fn has_consumed_diagnostics(&self, session_id: u32, task_id: u32) -> bool {
-        self.consumed_diagnostics.lock().unwrap().contains_key(&((session_id as u64) << 32 | task_id as u64))
+        self.consumed_diagnostics
+            .lock()
+            .unwrap()
+            .contains_key(&((session_id as u64) << 32 | task_id as u64))
     }
     pub fn clear_session_diagnostics(&self, session_id: u32) {
-        self.consumed_diagnostics.lock().unwrap().retain(|key, _| (*key >> 32) as u32 != session_id);
+        self.consumed_diagnostics
+            .lock()
+            .unwrap()
+            .retain(|key, _| (*key >> 32) as u32 != session_id);
     }
 
     pub fn is_running(&self, session_id: u32, task_id: u32) -> bool {

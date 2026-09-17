@@ -43,10 +43,11 @@ fn normalize(value: &json::JsonValue, depth: usize) -> json::JsonValue {
 
 fn detail(error: &io::Error, fallback: &str) -> json::JsonValue {
     let text = error.to_string();
-    if let Ok(value) = json::parse(&text) {
-        if value["error"]["code"].is_string() && value["error"]["message"].is_string() {
-            return normalize(&value["error"], 0);
-        }
+    if let Ok(value) = json::parse(&text)
+        && value["error"]["code"].is_string()
+        && value["error"]["message"].is_string()
+    {
+        return normalize(&value["error"], 0);
     }
     json::object! {code: fallback, message: bounded(&text, MESSAGE_BYTES)}
 }
