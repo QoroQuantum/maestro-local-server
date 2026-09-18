@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const OUTPUT_HALF_BYTES: usize = 32 * 1024;
 const OUTPUT_MARKER: &str = "\n[... Maestro log output truncated ...]\n";
+const MAX_SEED_RECORDS: usize = 256;
+const MAX_BATCH_DEPTH: usize = 4;
 
 /// Keep startup context and recent output without letting a noisy worker grow
 /// daemon memory indefinitely. Limits count raw bytes, before lossy UTF-8 decoding.
@@ -43,6 +45,8 @@ pub(super) struct TaskDiagnostics {
     pub output: Arc<Mutex<CapturedOutput>>,
     pub error: Option<String>,
     pub context: json::JsonValue,
+    seeds: Vec<json::JsonValue>,
+    seeds_truncated: bool,
     events: Vec<json::JsonValue>,
     events_truncated: bool,
 }
@@ -53,6 +57,8 @@ impl Default for TaskDiagnostics {
             output: Arc::default(),
             error: None,
             context: json::object! {},
+            seeds: Vec::new(),
+            seeds_truncated: false,
             events: Vec::new(),
             events_truncated: false,
         }
@@ -64,6 +70,36 @@ impl TaskDiagnostics {
         Self {
             context,
             ..Default::default()
+        }
+    }
+
+    /// Retain only resolved seeds, independently of the consumable result.
+    pub fn record_result(&mut self, result: &str) {
+        if let Ok(value) = json::parse(result) {
+            self.collect_seeds(&value, &mut Vec::new());
+        }
+    }
+
+    fn collect_seeds(&mut self, value: &json::JsonValue, path: &mut Vec<usize>) {
+        if let Some(seed) = value["seed"].as_u64() {
+            let mut record = json::object! {result_path: path.clone(), seed: seed};
+            if let Some(noise_seed) = value["noise"]["seed"].as_u64() {
+                record["noise_seed"] = noise_seed.into();
+            }
+            self.seeds.push(record);
+        }
+        // Only native batches contain independently seeded child requests.
+        // Checkpoint suffixes share their parent seed and are not separate runs.
+        if value["operation"] == "batch" {
+            for (index, child) in value["results"].members().enumerate() {
+                if self.seeds.len() == MAX_SEED_RECORDS || path.len() == MAX_BATCH_DEPTH {
+                    self.seeds_truncated = true;
+                    break;
+                }
+                path.push(index);
+                self.collect_seeds(child, path);
+                path.pop();
+            }
         }
     }
 
@@ -103,6 +139,7 @@ impl TaskDiagnostics {
             error: error, failure_message: self.error.clone(),
             context: self.context.clone(), events: self.events.clone(),
             events_truncated: self.events_truncated,
+            seeds: self.seeds.clone(), seeds_truncated: self.seeds_truncated,
         }
     }
 }
@@ -230,6 +267,84 @@ pub(super) fn with_causes(error: io::Error, code: &str, causes: &[&io::Error]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_seeds_preserve_uint64_and_exclude_result_data() {
+        for seed in [0, u64::MAX] {
+            let mut record = TaskDiagnostics::default();
+            record.record_result(
+                &json::object! {
+                    operation: "execute", seed: seed, noise: {seed: 23, channels: "excluded"},
+                    counts: {excluded: 42}, execution_metadata: {excluded: true},
+                }
+                .dump(),
+            );
+            let document = json::parse(&record.document(1, 2).dump()).unwrap();
+            assert_eq!(
+                document["seeds"],
+                json::array![
+                    json::object! {result_path: json::array![], seed: seed, noise_seed: 23}
+                ]
+            );
+            assert_eq!(document["seeds_truncated"], false);
+            assert!(!document.dump().contains("excluded"));
+        }
+        for result in ["not JSON", r#"{"valid":true}"#, r#"{"seed":-1}"#] {
+            let mut record = TaskDiagnostics::default();
+            record.record_result(result);
+            assert_eq!(record.document(1, 2)["seeds"], json::array![]);
+        }
+    }
+
+    #[test]
+    fn batch_seeds_keep_result_paths_and_checkpoint_parent_seed() {
+        let mut record = TaskDiagnostics::default();
+        record.record_result(
+            &json::object! {
+                operation: "batch", results: json::array![
+                    json::object! {operation: "validate", valid: true},
+                    json::object! {operation: "batch", results: json::array![
+                        json::object! {operation: "execute", seed: u64::MAX, noise: {seed: 17}},
+                        json::object! {operation: "checkpoint_batch", seed: 0,
+                            results: json::array![json::object! {counts: {excluded: 1}}]},
+                    ]},
+                ],
+            }
+            .dump(),
+        );
+        let document = record.document(1, 2);
+        assert_eq!(
+            document["seeds"],
+            json::array![
+                json::object! {result_path: json::array![1, 0], seed: u64::MAX, noise_seed: 17},
+                json::object! {result_path: json::array![1, 1], seed: 0},
+            ]
+        );
+        assert_eq!(document["seeds_truncated"], false);
+    }
+
+    #[test]
+    fn seed_history_is_bounded_and_marks_omitted_results() {
+        for count in [MAX_SEED_RECORDS, MAX_SEED_RECORDS + 1] {
+            let children: Vec<_> = (0..count).map(|seed| json::object! {seed: seed}).collect();
+            let mut record = TaskDiagnostics::default();
+            record.record_result(&json::object! {operation: "batch", results: children}.dump());
+            let document = record.document(1, 2);
+            assert_eq!(document["seeds"].len(), MAX_SEED_RECORDS);
+            assert_eq!(document["seeds_truncated"], count > MAX_SEED_RECORDS);
+            assert_eq!(
+                document["seeds"][MAX_SEED_RECORDS - 1]["result_path"],
+                json::array![MAX_SEED_RECORDS - 1]
+            );
+        }
+        let mut result = json::object! {seed: 123};
+        for _ in 0..MAX_BATCH_DEPTH + 1 {
+            result = json::object! {operation: "batch", results: json::array![result]};
+        }
+        let mut record = TaskDiagnostics::default();
+        record.record_result(&result.dump());
+        assert_eq!(record.document(1, 2)["seeds_truncated"], true);
+    }
 
     #[test]
     fn output_keeps_prefix_and_latest_tail_across_sizes_and_chunk_boundaries() {

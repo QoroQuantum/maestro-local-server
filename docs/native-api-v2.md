@@ -82,6 +82,16 @@ Additional diagnostic fields are additive within API v2:
   a truncation marker. Circuits, arbitrary options, and launcher commands are
   excluded. Omitted automatic selections are not resolved here; effective native
   execution metadata remains in the task result.
+- `seeds` retains resolved seeds from successful results, including after result
+  consumption. Each entry has `seed` (the full unsigned 64-bit execution seed),
+  optional `noise_seed`, and `result_path`. The path is empty for an ordinary
+  request; for nested batches its indices select successive `results` members.
+  Apply the saved values as `execution.seed` and `noise.seed` on the corresponding
+  original request to replay it with the same backend and configuration.
+  Checkpoint batches retain their shared parent seed. Validation and results
+  without a reported seed add no entries. At most 256 entries and four batch
+  levels are retained; `seeds_truncated` indicates unvisited results. This seed
+  history has the same lifetime as the other diagnostics, not disk persistence.
 
 `ok:true` means log retrieval succeeded, including for a failed or cancelled task.
 Cancelled tasks still have no legacy result/status record; retained diagnostics

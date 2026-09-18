@@ -227,6 +227,9 @@ impl Runner {
                 record.error = failure;
                 let mut results = self.results_map.lock().unwrap();
                 if let Some(diagnostic) = self.task_diagnostics.lock().unwrap().get_mut(&key) {
+                    if record.error.is_none() {
+                        diagnostic.record_result(&record.result);
+                    }
                     diagnostic.event(if record.error.is_some() {
                         "failed"
                     } else {
@@ -417,6 +420,45 @@ mod tests_runner {
     use crate::maestro::sessions::Session;
     use serial_test::serial;
     use std::sync::Barrier;
+
+    #[test]
+    fn resolved_seed_history_survives_result_consumption_until_session_cleanup() {
+        let runner = Runner::new();
+        let mut task = maestro::worker::tests::task("");
+        task.task_type = TaskType::Request;
+        let key = task_key(task.session_id, task.task_id);
+        let execution = Arc::new(maestro::worker::Execution::new());
+        *runner.active_task.lock().unwrap() = Some(ActiveTask {
+            session_id: task.session_id,
+            task_id: task.task_id,
+            execution: Arc::clone(&execution),
+        });
+        runner
+            .task_diagnostics
+            .lock()
+            .unwrap()
+            .insert(key, TaskDiagnostics::default());
+        let result = json::object! {operation: "execute", seed: u64::MAX, noise: {seed: 0}}.dump();
+        runner.finish_task(
+            &task,
+            &execution,
+            maestro::worker::Outcome::Completed(result.clone()),
+        );
+        let before = runner.diagnostics(task.session_id, task.task_id);
+        assert_eq!(before["seeds"][0]["seed"].as_u64(), Some(u64::MAX));
+        assert_eq!(before["seeds"][0]["noise_seed"], 0);
+        assert_eq!(
+            runner
+                .get_result(task.session_id, task.task_id)
+                .unwrap()
+                .result,
+            result
+        );
+        assert!(!runner.is_task_result_available(task.session_id, task.task_id));
+        assert_eq!(runner.diagnostics(task.session_id, task.task_id), before);
+        runner.clear_session_diagnostics(task.session_id);
+        assert!(!runner.has_diagnostics(task.session_id, task.task_id));
+    }
 
     #[test]
     fn cancelled_task_is_not_enqueued() {
