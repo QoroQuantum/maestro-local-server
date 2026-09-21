@@ -16,6 +16,17 @@ runtime search path. Only defined Maestro environment variables are tracked for
 Cargo rebuilds. After first setting a previously unset override, clean this
 package before rebuilding; see the [build instructions](../README.md#local-development-setup).
 
+Native requests default to fixed backend selection. With Maestro's fixed-backend
+multi-shot reuse fix, this still evolves eligible circuits once per execution job
+and samples repeatedly; it does not require `selection:"automatic"`. The fix lives
+in `libmaestro.so`, not in this server's request forwarding. Update the library
+actually loaded by the daemon/workers (and native CLI/MPI workers used by launch
+profiles), then restart the daemon. Merely updating the Maestro source checkout
+does not replace an older installed library. Reuse is confined to each injected
+noise realization; measurements, sampled relaxation resets, and readout errors
+still draw independent outcomes per shot. Exact density-matrix/MPO channels
+retain their channel evolution before sampling.
+
 ## Protocol
 
 One compact JSON document follows `API ` and ends with a newline. JSON escaping

@@ -301,6 +301,42 @@ fn native_execute_and_estimate_use_worker() {
 }
 
 #[test]
+fn native_fixed_selection_preserves_method_and_multiple_shots() {
+    for method in ["statevector", "matrix_product_state"] {
+        for explicit_selection in [false, true] {
+            let mut request = json::object! {
+                schema_version: 2, operation: "execute",
+                circuit: {
+                    num_qubits: 2, num_clbits: 2,
+                    source: "OPENQASM 2.0; qreg q[2]; creg c[2]; h q[0]; cx q[0],q[1]; measure q->c;",
+                },
+                simulator: { backend: "qcsim", method: method },
+                execution: { shots: 4096, seed: 123 },
+            };
+            if explicit_selection {
+                request["simulator"]["selection"] = "fixed".into();
+            }
+            let mut task = task(&request.dump());
+            task.task_type = TaskType::Request;
+            let Outcome::Completed(result) = execute(&task, &Execution::new()) else {
+                panic!("Fixed native worker did not complete");
+            };
+            let result = json::parse(&result).unwrap();
+            assert_eq!(result["ok"], true);
+            assert_eq!(result["execution_metadata"]["backend"], "qcsim");
+            assert_eq!(result["execution_metadata"]["method"], method);
+            assert_eq!(result["execution_metadata"]["selection"], "fixed");
+            assert_eq!(result["shots"].as_u64(), Some(4096));
+            assert_eq!(result["counts"].len(), 2);
+            let zeros = result["counts"]["00"].as_u64().unwrap();
+            let ones = result["counts"]["11"].as_u64().unwrap();
+            assert_eq!(zeros + ones, 4096);
+            assert!(zeros > 1024 && ones > 1024);
+        }
+    }
+}
+
+#[test]
 fn truncated_protocol_frame_is_rejected() {
     let data = [0, 0, 0, 0, 0, 0, 0, 20, b'{'];
     let error = protocol::read_message(&mut data.as_slice()).unwrap_err();
