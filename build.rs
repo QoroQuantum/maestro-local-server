@@ -7,6 +7,34 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Source archives have no Git metadata. Never identify the build by a runtime checkout.
+    let revision = std::path::Path::new(".git")
+        .exists()
+        .then(|| {
+            std::process::Command::new("git")
+                .args(["describe", "--always", "--dirty", "--exclude", "*"])
+                .output()
+        })
+        .and_then(Result::ok)
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .unwrap_or_else(|| "unknown".into());
+    println!(
+        "cargo:rustc-env=MAESTRO_SERVER_REVISION={}",
+        revision.trim()
+    );
+    for path in [
+        "src",
+        "Cargo.toml",
+        "build.rs",
+        "build_config.rs",
+        ".git/HEAD",
+        ".git/refs",
+        ".git/packed-refs",
+        ".git/index",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     let paths =
         BuildPaths::resolve(|name| env::var_os(name)).unwrap_or_else(|error| panic!("{error}"));
     for variable in &paths.watched_env {

@@ -116,6 +116,7 @@ pub struct Runner {
     results_map: Mutex<HashMap<u64, TaskResult>>,
     task_diagnostics: Mutex<HashMap<u64, TaskDiagnostics>>,
     stop: AtomicBool,
+    running: AtomicBool,
     // Lock order: tasks_queue -> active_task -> results_map -> task_diagnostics.
     // Diagnostic output locks come last. Register a task
     // before releasing the queue lock, including while its worker is starting.
@@ -136,6 +137,7 @@ impl Runner {
             task_diagnostics: Mutex::new(HashMap::new()),
             stop: std::sync::atomic::AtomicBool::new(false),
             active_task: Mutex::new(None),
+            running: AtomicBool::new(false),
         };
 
         Arc::new(myself)
@@ -143,6 +145,15 @@ impl Runner {
 
     pub fn run(runner: Arc<Runner>) -> std::thread::JoinHandle<i32> {
         thread::spawn(move || {
+            // The guard clears liveness on normal exit and panic unwinding.
+            struct Activity<'a>(&'a AtomicBool);
+            impl Drop for Activity<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            runner.running.store(true, Ordering::SeqCst);
+            let _activity = Activity(&runner.running);
             loop {
                 // Dequeue and register together, so cancellation cannot miss
                 // a task between leaving the queue and spawning its worker.
@@ -181,6 +192,42 @@ impl Runner {
 
             0
         })
+    }
+
+    /// A consistent queue/active snapshot; this does not probe devices or renew sessions.
+    pub fn status(&self) -> json::JsonValue {
+        let queue = self
+            .tasks_queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let active = self
+            .active_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let poisoned = self.tasks_queue.is_poisoned()
+            || self.active_task.is_poisoned()
+            || self.results_map.is_poisoned()
+            || self.task_diagnostics.is_poisoned();
+        let running = self.running.load(Ordering::SeqCst);
+        let stopping = self.stop.load(Ordering::SeqCst);
+        let healthy = running && !poisoned;
+        let reason = if poisoned {
+            Some("runner_state_poisoned")
+        } else if stopping {
+            Some("shutting_down")
+        } else if !running {
+            Some("runner_not_running")
+        } else {
+            None
+        };
+        json::object! {
+            accepting_jobs: healthy && !stopping,
+            healthy: healthy,
+            busy: active.is_some() || !queue.is_empty(),
+            pending_job_count: queue.len(),
+            status_reason: reason,
+            health_scope: "runner",
+        }
     }
 
     fn finish_task(
@@ -420,6 +467,50 @@ mod tests_runner {
     use crate::maestro::sessions::Session;
     use serial_test::serial;
     use std::sync::Barrier;
+
+    #[test]
+    fn status_tracks_liveness_queue_active_work_and_shutdown() {
+        let runner = Runner::new();
+        assert_eq!(runner.status()["accepting_jobs"], false);
+        runner.running.store(true, Ordering::SeqCst);
+        assert_eq!(runner.status()["healthy"], true);
+        assert_eq!(runner.status()["busy"], false);
+        let task = maestro::worker::tests::task("");
+        runner.tasks_queue.lock().unwrap().push_back(task);
+        assert_eq!(runner.status()["pending_job_count"], 1);
+        assert_eq!(runner.status()["busy"], true);
+        let task = runner.tasks_queue.lock().unwrap().pop_front().unwrap();
+        *runner.active_task.lock().unwrap() = Some(ActiveTask {
+            session_id: task.session_id,
+            task_id: task.task_id,
+            execution: Arc::new(maestro::worker::Execution::new()),
+        });
+        assert_eq!(runner.status()["pending_job_count"], 0);
+        assert_eq!(runner.status()["busy"], true);
+        runner.active_task.lock().unwrap().take();
+        assert_eq!(runner.status()["busy"], false);
+        runner.stop.store(true, Ordering::SeqCst);
+        assert_eq!(runner.status()["accepting_jobs"], false);
+        assert_eq!(runner.status()["status_reason"], "shutting_down");
+        runner.running.store(false, Ordering::SeqCst);
+        assert_eq!(runner.status()["healthy"], false);
+    }
+
+    #[test]
+    fn status_reports_poisoned_runner_without_panicking() {
+        let runner = Runner::new();
+        let clone = Arc::clone(&runner);
+        assert!(
+            thread::spawn(move || {
+                let _queue = clone.tasks_queue.lock().unwrap();
+                panic!("test runner failure");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(runner.status()["healthy"], false);
+        assert_eq!(runner.status()["status_reason"], "runner_state_poisoned");
+    }
 
     #[test]
     fn resolved_seed_history_survives_result_consumption_until_session_cleanup() {

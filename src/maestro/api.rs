@@ -66,7 +66,7 @@ fn dispatch(
         return failure("invalid_input", "Missing command");
     };
     let allowed = match command {
-        "capabilities" => &["version", "command"][..],
+        "capabilities" | "status" => &["version", "command"][..],
         "submit" => &["version", "command", "session_id", "request"][..],
         "keepalive" => &["version", "command", "session_id"][..],
         "logs" => &["version", "command", "session_id", "task_id"][..],
@@ -74,6 +74,9 @@ fn dispatch(
     };
     if value.entries().any(|(key, _)| !allowed.contains(&key)) {
         return failure("invalid_input", "Unknown API field");
+    }
+    if command == "status" {
+        return json::object! {version: VERSION, ok: true, status: runner.status()};
     }
     if command == "capabilities" {
         let native = match json::parse(&simulators::capabilities()) {
@@ -87,7 +90,8 @@ fn dispatch(
         return json::object! {
             version: VERSION, ok: true, native: native,
             server: {
-                commands: ["capabilities", "submit", "logs", "keepalive"],
+                commands: ["capabilities", "submit", "logs", "keepalive", "status"],
+                build: {version: env!("CARGO_PKG_VERSION"), source_revision: env!("MAESTRO_SERVER_REVISION")},
                 session_lease_seconds: session_lease_seconds(),
                 max_request_bytes: MAX_REQUEST_BYTES,
                 execution: "native_worker_process",
@@ -150,6 +154,21 @@ pub fn handle(document: &str, manager: &Arc<SessionManager>, runner: &Arc<Runner
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_requires_no_session_and_rejects_session_fields() {
+        let manager = SessionManager::new(100);
+        let runner = Runner::new();
+        let status = dispatch(r#"{"version":2,"command":"status"}"#, &manager, &runner);
+        assert_eq!(status["ok"], true);
+        assert_eq!(status["status"]["status_reason"], "runner_not_running");
+        let error = dispatch(
+            r#"{"version":2,"command":"status","session_id":0}"#,
+            &manager,
+            &runner,
+        );
+        assert_eq!(error["error"]["code"], "invalid_input");
+    }
+
     #[test]
     fn validation_envelopes_reject_missing_or_partial_errors() {
         for value in [

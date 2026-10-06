@@ -146,8 +146,8 @@ which operations, options, and diagnostics are supported. Query
 contains the current option names and applicability, and `native.backends`
 contains method names and build-dependent legacy IDs. A schema version of 2 does
 not identify a particular Maestro release or guarantee that an older option name
-is still accepted. Diagnostic subqueries are not individually listed in the
-capability catalog; native request validation checks their support.
+is still accepted. Newer native builds list diagnostic subqueries and their supported backend/method
+pairs in `native.diagnostics`; validation remains authoritative.
 
 Recent Maestro releases changed these keys under `request.simulator.options`:
 
@@ -406,3 +406,29 @@ ctest --test-dir "$MAESTRO_DIR/build" --output-on-failure \
 Missing hardware/plugin prerequisites can mark these tests skipped; review that
 status separately from passing numerical tests. The distributed GPU suites have
 additional MPI/CUDA-aware MPI prerequisites described in Maestro's documentation.
+
+
+## Resource status and build discovery
+
+`API {"version":2,"command":"status"}` returns an additive API v2 response:
+
+```json
+{"version":2,"ok":true,"status":{"accepting_jobs":true,"healthy":true,"busy":false,"pending_job_count":0,"status_reason":null,"health_scope":"runner"}}
+```
+
+No session is needed or renewed. The queue and active task are sampled under the
+runner's lock order; pending jobs exclude the active job. Busy means queued or
+active execution. Healthy means the runner thread is live and its shared state
+is not poisoned; accepting_jobs additionally requires that shutdown has not
+begun. Reasons include `runner_not_running`, `runner_state_poisoned` and
+`shutting_down`. This describes runner availability, not GPU/plugin/licence
+readiness, and does not advertise acquisition capacity. Clients may fall back to
+PING only for an explicitly unsupported API/command, keeping other failures
+visible. Session-specific polling/keepalive is still required for long leases.
+
+Capabilities advertise `status` in `server.commands` and identify the server
+build with `server.build.version` and `server.build.source_revision` (or `unknown`
+without Git metadata). The native catalog is forwarded unchanged, including new
+`build`, `diagnostics`, option `enum`/bounds and `supported_configurations` fields.
+Native `capability_scope: "validation"` explicitly excludes runtime device
+readiness. Optional plugin exports must match the deployed Maestro build.

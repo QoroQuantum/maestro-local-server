@@ -457,3 +457,23 @@ fn independent_tensor_requests_keep_noise_results_and_seed_paths() {
         assert_eq!(logs["seeds"][index]["seed"], seed);
     }
 }
+
+#[test]
+fn status_and_build_information_are_available_without_acquisition() {
+    let server = Server::start();
+    let status = server.api(object! {version: 2, command: "status"});
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["status"]["accepting_jobs"], true);
+    assert_eq!(status["status"]["healthy"], true);
+    assert_eq!(status["status"]["busy"], false);
+    assert_eq!(status["status"]["pending_job_count"], 0);
+    let caps = server.api(object! {version: 2, command: "capabilities"});
+    assert!(caps["server"]["commands"].members().any(|v| v == "status"));
+    assert!(caps["server"]["build"]["source_revision"].is_string());
+    assert!(caps["native"]["build"]["source_revision"].is_string());
+    assert!(
+        caps["native"]["diagnostics"]
+            .members()
+            .any(|v| v["name"] == "operator_expectation")
+    );
+}
