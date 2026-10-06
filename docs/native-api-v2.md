@@ -137,6 +137,171 @@ profiles launch the separate C++ `maestro-mpi-worker`. Capability catalog querie
 remain in the daemon. JSON is bounded and serialized across process boundaries;
 this protocol does not provide zero-copy transport.
 
+## Current native options and client migration
+
+The server forwards the native request document (except outer `launch` metadata)
+and returns the complete native result. The loaded Maestro library determines
+which operations, options, and diagnostics are supported. Query
+`API {"version":2,"command":"capabilities"}` after an upgrade; `native.options`
+contains the current option names and applicability, and `native.backends`
+contains method names and build-dependent legacy IDs. A schema version of 2 does
+not identify a particular Maestro release or guarantee that an older option name
+is still accepted. Diagnostic subqueries are not individually listed in the
+capability catalog; native request validation checks their support.
+
+Recent Maestro releases changed these keys under `request.simulator.options`:
+
+| Previous JSON option | Current JSON option/value |
+| --- | --- |
+| `use_double_precision: true` / `false` | `precision: "double"` / `"single"` |
+| `mps_measure_no_collapse: true` / `false` | `mps_sampling: "probabilities"` / `"apply_measure"` |
+| `mps_sample_measure_algorithm: "mps_probabilities"` / `"mps_apply_measure"` | `mps_sampling: "probabilities"` / `"apply_measure"` |
+| `mps_use_gesvd`, `mps_use_gesvdj`, `mps_use_gesvdp`, `mps_use_gesvdr` | `mps_svd_solver: "gesvd"`, `"gesvdj"`, `"gesvdp"`, or `"gesvdr"` |
+| Corresponding `mpo_use_*` flags | `mpo_svd_solver` with the same solver names |
+| Corresponding `tensor_network_use_*` flags | `tensor_network_svd_solver` with the same solver names |
+| `pp_pauli_weight_threshold` | `pp_max_pauli_weight` |
+| `pp_steps_between_trims` | `pp_gates_between_trims` |
+| `pp_steps_between_deduplications` | `pp_gates_between_deduplications` |
+
+For SVD migration, select the solver whose old flag was true; omit the new option
+when all old flags were false. Do not send old and new keys together. Precision
+applies to the supported Aer/GPU backends, and SVD selectors to the corresponding
+GPU tensor method. QCSim computes in double precision. CPU Pauli propagation also
+accepts `pp_workers` (0 through 1024) and `pp_sampling_cache_nodes` (nonnegative).
+The default Pauli deduplication cadence is 10 operations.
+
+The server deliberately uses Maestro's validation rules without translating old
+keys. Removed JSON options produce `invalid_input` during submission, before
+allocation of a task ID. Some native configuration aliases remain accepted;
+use only aliases advertised by the loaded library. In particular, a key accepted
+by low-level `ConfigureSimulator` is not necessarily accepted in the JSON request
+contract. The legacy `SET_OPTIONS` payload is forwarded to the separate legacy
+API and should not be treated as interchangeable with `simulator.options`.
+
+## Tensor queries and gate fusion
+
+These features use the existing `submit` command and production worker process;
+no extra socket commands or persistent simulator handles are needed:
+
+| Feature | Native request fields |
+| --- | --- |
+| Batched Pauli expectations | `operation: "estimate"`, `observables: [...]` |
+| Batched expectations at successive evolution steps | `operation: "incremental_evolve"`, `step_circuit`, `steps`, `observables` |
+| Complex normalized/raw MPO expectation batches | `operation: "diagnostics"`, `diagnostics: ["expectations_complex", "unnormalized_expectations"]`, `observables` |
+| Normalized/raw MPO dense matrices | `diagnostics: ["density_matrix", "unnormalized_density_matrix"]` |
+| Raw MPO matrix element | `diagnostics: ["element"]`, `row_state`, `col_state` |
+| Apply operators to an MPO | `operators: [{qubits, matrix, normalize}]` in a diagnostics request |
+| Read-only MPS operator expectation | `diagnostics: ["operator_expectation"]`, `expectation_operators` |
+| MPS/MPO routing and maintenance | `move_qubits`, `maintenance: ["trim", "recanonicalize"]` in a diagnostics request |
+| Full pure-state amplitudes/probabilities | `operation: "statevector"` or `"probabilities"`; omit `basis_states` for bulk output |
+
+Batched expectations preserve observable order and duplicates. `estimate` returns
+`expectation_values`; `incremental_evolve` returns `steps` and an
+`expectation_values` array of arrays, one per requested step. Native batching
+shares work within a prepared state, never between different noise realizations
+or evolution steps. The native `batch` operation can also group independent
+requests, validating all members before computation.
+
+For example, this complete submit envelope evaluates ordered operators on an MPS.
+Create a session first and substitute its ID. Serialize each example onto one line
+and prefix it with `API ` when sending it over the socket:
+
+```json
+{
+  "version": 2,
+  "command": "submit",
+  "session_id": 0,
+  "request": {
+    "schema_version": 2,
+    "operation": "diagnostics",
+    "circuit": {"num_qubits": 2, "source": "OPENQASM 2.0; qreg q[2];"},
+    "simulator": {"backend": "qcsim", "method": "matrix_product_state"},
+    "diagnostics": ["operator_expectation"],
+    "expectation_operators": [
+      {"qubit": 0, "matrix": [0, 1, 1, 0]},
+      {"qubit": 0, "matrix": [0, [0, -1], [0, 1], 0]}
+    ],
+    "execution": {"seed": 123}
+  }
+}
+```
+
+Poll `SESSION <session_id> TASK <task_id> FINISHED` using the submitted task ID,
+check `FAILED`, then retrieve `GET_RESULTS`. The result's `operator_expectation`
+is `[0,-1]`, since the operators act in list order and `YX = -iZ`. This is a
+read-only query. The separate MPO `operators` field changes the state by
+`A rho A†`; `normalize` defaults to false. For example:
+
+```json
+{
+  "version": 2,
+  "command": "submit",
+  "session_id": 0,
+  "request": {
+    "schema_version": 2,
+    "operation": "diagnostics",
+    "circuit": {"num_qubits": 2, "source": "OPENQASM 2.0; qreg q[2];"},
+    "simulator": {
+      "backend": "qcsim", "method": "matrix_product_operator",
+      "options": {"max_bond_dimension": 0}
+    },
+    "operators": [{"qubits": [0], "matrix": [2, 0, 0, 1], "normalize": false}],
+    "diagnostics": ["trace", "expectations_complex", "unnormalized_expectations"],
+    "observables": ["ZI", "IZ", "ZI"],
+    "execution": {"seed": 123}
+  }
+}
+```
+
+This returns trace `[4,0]`, three normalized expectations `[1,0]`, and three raw
+expectations `[4,0]`. JSON matrices are flat row-major arrays with real numbers or
+`[real,imaginary]` entries. Dense matrix results use `{dimension,row_major}`.
+Pauli strings and bitstrings put qubit zero first; integer basis indices put it
+in the least-significant bit. These conventions also hold after chain movement.
+Routing can truncate a state under the configured bond cap/cutoff.
+
+CPU and current GPU MPO support `state_probability.target_state` and execution
+count strings wider than 64 qubits. `max_bond_dimension: 0` means unlimited for
+MPO; it is not generally valid for other tensor methods. Full state and matrix
+outputs still grow exponentially. `max_output_elements` bounds supported queries
+(default 65536, maximum 1048576), independently of the 64 MiB serialized result
+limit. Prefer selected basis states, elements, or expectations for large registers.
+
+Set `simulator.options.gate_fusion` to true or false to override native defaults.
+When omitted, fusion is enabled on eligible methods except small CPU statevectors
+(below 11 qubits) and CPU density matrices (below 5 qubits). It is independent of
+`optimize_circuit`; unsupported methods retain their existing behavior. Results
+include `execution_metadata.gate_fusion` with `requested` (null if omitted),
+`enabled`, and `max_qubits`, describing the backend actually used. This metadata,
+including effective configured options, is returned unchanged. Save it with the
+result if needed later: retained task logs keep seed history and request context,
+not the full execution metadata.
+
+## Upgrading native and GPU libraries
+
+Build and install matching Maestro headers and `libmaestro.so`, then rebuild the
+server and restart it. Include `InterfaceTypes.h` when installing the current
+header; `Interface.h` now includes it. Use the Maestro-pinned QCSim revision when
+building Maestro, or ensure an explicit `QCSIM_INCLUDE_DIR` points at a compatible
+revision. QCSim is compiled into Maestro; updating its source alone does not
+update the running server. Sampling, noise, routing, precision and kernel fixes
+take effect through the rebuilt native library.
+
+Upgrade the GPU plugin alongside Maestro when using tensor backends. Current
+Maestro requires the expanded MPO API, including `MPOSampleBits` and
+`MPOSampleHistogram`, and rejects older incompatible MPO plugins. Several newer
+MPS queries, including arbitrary-operator expectations and explicit chain moves,
+also need updated exports. Other queries retain scalar or dense-reader fallbacks
+when optional exports are absent; an actual backend query failure is still an
+error. Updating the plugin requires restarting processes that already loaded it.
+
+Check the libraries visible to the installed service, including its loader paths,
+license, device access, and the binaries/plugins on MPI nodes. A successful
+`capabilities` response or native validation does not prove GPU runtime readiness.
+Exercise a small request on each deployed backend after an upgrade and inspect
+both the result and retained task logs. GPU hardware tests are opt-in; CPU mock
+tests verify plugin dispatch and fallback behavior without proving CUDA execution.
+
 ## Native MPI profiles
 
 Set `MAESTRO_MPI_PROFILES` to an administrator-owned JSON file:
@@ -221,5 +386,23 @@ not require MPI hardware. QRMI's opt-in native
 integration suite starts a private instance of this daemon and exercises the full
 client/adapter path. Maestro CTest additionally covers two-rank native MPI
 success/failure and optional local and MPI GPU distribution. The server CI build
-enables Maestro's native request contract suite. No system service needs replacing
-to run those tests.
+enables Maestro's native request contract suite, `expectation_batches`,
+`tensor_dispatch_current`, `tensor_dispatch_legacy`, `fusion_interface_wrappers`,
+and `network_jobs`. The mock-plugin suites require no GPU.
+
+`cargo test --test native_api` starts private production daemons and exercises the
+new tensor queries, wide MPO registers, fusion metadata, current option names,
+validation bounds, and result/seed retrieval over the public socket. Each daemon
+owns a separate temporary socket. No system service needs replacing to run tests.
+
+On a configured GPU host, a Maestro build with `MAESTRO_BUILD_REQUEST_TESTS=ON`
+also provides these optional hardware checks:
+
+```bash
+ctest --test-dir "$MAESTRO_DIR/build" --output-on-failure \
+  -R '^(gpu_tensor_queries_(single|double)|gpu_tensor_cpp_wrappers)$'
+```
+
+Missing hardware/plugin prerequisites can mark these tests skipped; review that
+status separately from passing numerical tests. The distributed GPU suites have
+additional MPI/CUDA-aware MPI prerequisites described in Maestro's documentation.

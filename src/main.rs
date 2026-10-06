@@ -304,6 +304,37 @@ mod server_tests {
     use super::*;
     use serial_test::serial;
 
+    struct TestServer {
+        listener: Option<thread::JoinHandle<std::io::Result<()>>>,
+        runner: Arc<maestro::runner::Runner>,
+        runner_thread: Option<thread::JoinHandle<i32>>,
+        stop_flag: Arc<AtomicBool>,
+    }
+
+    impl TestServer {
+        fn start() -> Self {
+            let (listener, runner, runner_thread, stop_flag) = maestro_server::start(false, true);
+            Self {
+                listener: Some(listener),
+                runner,
+                runner_thread: Some(runner_thread),
+                stop_flag,
+            }
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            // A failed assertion or deadline must also stop this test's server.
+            self.stop_flag.store(false, Ordering::SeqCst);
+            maestro_server::stop(
+                self.listener.take().unwrap(),
+                Arc::clone(&self.runner),
+                self.runner_thread.take().unwrap(),
+            );
+        }
+    }
+
     fn send_command_noclose(mut stream: &mut UnixStream, command: &str) -> std::io::Result<String> {
         stream.write_all(command.as_bytes())?;
         let mut response = String::new();
@@ -345,7 +376,7 @@ mod server_tests {
     #[test]
     #[serial]
     fn server_test_nodisconnect() {
-        let (session_thread, runner, runner_thread, stop_flag) = maestro_server::start(false, true);
+        let server = TestServer::start();
 
         // let the server some time to start
         thread::sleep(Duration::from_millis(1500));
@@ -356,8 +387,14 @@ mod server_tests {
 
         //assert!(std::fs::metadata(socket_path).is_ok(), "Socket file does not exist after waiting for server to start");
 
-        while !std::fs::metadata(socket_path).is_ok() {
-            thread::sleep(Duration::from_millis(100));
+        let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(socket_path).is_err() {
+            assert!(
+                !server.listener.as_ref().unwrap().is_finished()
+                    && std::time::Instant::now() < startup_deadline,
+                "Test server did not create {socket_path} within 10 seconds"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
         thread::sleep(Duration::from_millis(100));
 
@@ -621,7 +658,12 @@ mod server_tests {
 
         // now wait until it's finished
         let mut finished = false;
+        let task_deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !finished {
+            assert!(
+                std::time::Instant::now() < task_deadline,
+                "Task 0 in session {session_id} did not finish within 20 seconds"
+            );
             let response = send_command_noclose(
                 &mut stream,
                 &format!("SESSION {} TASK 0 FINISHED\n", session_id),
@@ -720,15 +762,13 @@ mod server_tests {
 
         drop(stream);
 
-        stop_flag.store(false, Ordering::SeqCst);
-
-        maestro_server::stop(session_thread, runner, runner_thread);
+        drop(server);
     }
 
     #[test]
     #[serial]
     fn server_test_disconnect() {
-        let (session_thread, runner, runner_thread, stop_flag) = maestro_server::start(false, true);
+        let server = TestServer::start();
 
         // let the server some time to start
         thread::sleep(Duration::from_millis(1500));
@@ -736,8 +776,14 @@ mod server_tests {
         // wait until the path exists
         let socket_path = "/tmp/maestro.sock";
         // loop until the file is there
-        while !std::fs::metadata(socket_path).is_ok() {
-            thread::sleep(Duration::from_millis(100));
+        let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::metadata(socket_path).is_err() {
+            assert!(
+                !server.listener.as_ref().unwrap().is_finished()
+                    && std::time::Instant::now() < startup_deadline,
+                "Test server did not create {socket_path} within 10 seconds"
+            );
+            thread::sleep(Duration::from_millis(10));
         }
         thread::sleep(Duration::from_millis(100));
 
@@ -972,7 +1018,12 @@ mod server_tests {
 
         // now wait until it's finished
         let mut finished = false;
+        let task_deadline = std::time::Instant::now() + Duration::from_secs(20);
         while !finished {
+            assert!(
+                std::time::Instant::now() < task_deadline,
+                "Task 0 in session {session_id} did not finish within 20 seconds"
+            );
             let response =
                 send_command_close(&format!("SESSION {} TASK 0 FINISHED", session_id)).unwrap();
             if response == "OK YES\n" {
@@ -1078,8 +1129,6 @@ mod server_tests {
             response
         );
 
-        stop_flag.store(false, Ordering::SeqCst);
-
-        maestro_server::stop(session_thread, runner, runner_thread);
+        drop(server);
     }
 }

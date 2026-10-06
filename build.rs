@@ -62,6 +62,19 @@ fn main() {
     // to bindgen, and lets you build up options for
     // the resulting bindings.
     let bindings = bindgen::Builder::default()
+        // Bind only the C entry points used here. Maestro also exposes low-level
+        // simulator types and system typedefs that are not part of this bridge.
+        .allowlist_function("GetMaestroObjectWithMute")
+        .allowlist_function("CreateSimpleSimulator")
+        .allowlist_function("DestroySimpleSimulator")
+        .allowlist_function("RemoveAllOptimizationSimulatorsAndAdd")
+        .allowlist_function("AddOptimizationSimulator")
+        .allowlist_function("SimpleExecute")
+        .allowlist_function("SimpleEstimate")
+        .allowlist_function("FreeResult")
+        .allowlist_function("MaestroGetCapabilitiesJson")
+        .allowlist_function("MaestroValidateRequestJson")
+        .allowlist_function("MaestroRunRequestJson")
         // clang args, we use c++17, although we expose C api
         .clang_args(["-x", "c++", "-std=c++17"].iter())
         .clang_arg(format!("-I{}", maestro_header.parent().unwrap().display()))

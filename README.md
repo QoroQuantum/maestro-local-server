@@ -70,6 +70,12 @@ rebuilds normally.
 Rebuild Maestro and the server together so their native API versions match.
 See [Native Maestro API v2](docs/native-api-v2.md) for the request protocol,
 MPI profiles, and runtime configuration.
+The native API also exposes current MPS/MPO diagnostics, batched expectations,
+wide MPO bitstrings, and gate-fusion controls. See the
+[option migration table](docs/native-api-v2.md#current-native-options-and-client-migration)
+before upgrading clients: native schema version 2 includes renamed options.
+Follow the [native/GPU upgrade guidance](docs/native-api-v2.md#upgrading-native-and-gpu-libraries)
+when replacing libraries or installing the current headers.
 
 After changing Maestro, rebuild both projects and restart the server. For a
 checkout selected with `MAESTRO_DIR`:
@@ -115,6 +121,12 @@ cargo test
 ```
 
 is sufficient.
+
+The `native_api` integration suite launches private daemons and tests the current
+native JSON contract through the public socket and production workers. It runs
+on CPU without GPU plugins. Run it alone with `cargo test --test native_api`.
+GPU hardware verification is described in the
+[native API verification guide](docs/native-api-v2.md#verification).
 
 ## Building the .deb package
 
