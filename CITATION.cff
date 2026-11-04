@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Roman
+    given-names: Adrian
+  - family-names: DiAdamo
+    given-names: Stephen
+title: "maestro-local-server: Local Unix-Socket Daemon for Maestro Quantum Simulation"
+version: 0.1.0
+license: GPL-3.0-only
+url: "https://github.com/QoroQuantum/maestro-local-server"
+repository-code: "https://github.com/QoroQuantum/maestro-local-server"
+preferred-citation:
+  type: article
+  title: "Maestro: Intelligent Execution for Quantum Circuit Simulation"
+  authors:
+    - family-names: Bertomeu
+      given-names: Oriol
+    - family-names: Ghayas
+      given-names: Hamzah
+    - family-names: Roman
+      given-names: Adrian
+    - family-names: DiAdamo
+      given-names: Stephen
+  institution:
+    name: "Qoro Quantum"
+  year: 2025

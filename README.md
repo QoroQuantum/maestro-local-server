@@ -1,38 +1,63 @@
 # maestro-local-server
 
 [![Build and Test](https://github.com/QoroQuantum/maestro-local-server/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/QoroQuantum/maestro-local-server/actions/workflows/build-and-test.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE)
 
 A local daemon that exposes [Maestro](https://github.com/QoroQuantum/maestro) quantum circuit
-simulation over a Unix domain socket. Clients connect to the socket and issue simple
-line-based text commands to create sessions, submit simulation tasks (circuit execution or
-observable estimation), poll their status, and retrieve results as JSON.
+simulation over a Unix domain socket. Clients connect to the socket and issue line-based
+commands or versioned JSON API v2 requests to create sessions, submit simulation tasks
+(circuit execution, observable estimation, statevector/MPO/MPS diagnostics, or batched jobs),
+poll their status, inspect bounded task logs, and retrieve results as JSON.
 
-The server listens on `/run/maestro.sock` when run as the installed systemd service (or
-`/tmp/maestro.sock` in test mode). Each client session tracks a set of tasks; tasks are queued
-and executed one at a time by a background runner thread. Each task runs in a fresh copy of
-the server executable in `--worker` mode, which calls Maestro through its C interface.
-Cancelling a running task terminates and reaps its worker process. Session deletion,
-idle-session cleanup, and daemon shutdown also cancel active work.
+## Overview and Architecture
 
-The [worker process design](docs/worker-process.md) describes the implementation plan,
-module layout, private IPC protocol, cancellation ordering, and tests.
+- **Unix Domain Socket Transport**: Listens on `/run/maestro.sock` when run as the installed
+  systemd service (or `/tmp/maestro.sock` in test mode, overridable via `MAESTRO_SOCKET`).
+- **Session and Queue Management**: Each client session tracks a set of tasks with automatic
+  idle-session lease expiration (`MAESTRO_SESSION_LEASE_SECONDS`). Tasks are queued and
+  executed sequentially by a background runner thread.
+- **Per-Task Worker Isolation**: Each task runs in a fresh subprocess of the server executable
+  in `--worker` mode (or `maestro-mpi-worker` when an MPI launch profile is selected), calling
+  Maestro through its C interface. Native validation also runs in an isolated worker before a
+  task ID is allocated, ensuring parser or backend crashes cannot take down the daemon.
+- **Deterministic Cancellation**: Cancelling a task, deleting or expiring a session, or
+  shutting down the daemon terminates and reaps the active worker process group and suppresses
+  late results.
 
-Supported commands (newline-terminated):
+## Supported Commands
 
-- `SESSION CREATE` / `SESSION <id> EXISTS` / `SESSION <id> DELETE`
-- `SESSION <id> TASK CREATE`
-- `SESSION <id> TASK <task_id> {EXISTS, VALID, PENDING, RUNNING, FINISHED, FAILED, CANCEL, EXECUTE, GET_RESULTS}`
-- `SESSION <id> TASK <task_id> {SET_TYPE, SET_QUBITS, SET_SIM_TYPE, SET_METHOD, SET_QASM, SET_OBSERVABLES, SET_OPTIONS} <value>`
-- `PING`
+The server accepts newline-terminated commands in two protocol families on the same socket:
+
+- **Native JSON API v2** (`API <json>`):
+  - `API {"version":2,"command":"status"}` — runner health and queue status
+  - `API {"version":2,"command":"capabilities"}` — native backend/method/option catalog, build metadata, and MPI profiles
+  - `API {"version":2,"command":"submit","session_id":<id>,"request":{...}}` — atomic validation and submission of native schema v2 requests
+  - `API {"version":2,"command":"logs","session_id":<id>,"task_id":<task_id>}` — retained stdout/stderr, lifecycle events, seeds, and structured errors
+  - `API {"version":2,"command":"keepalive","session_id":<id>}` — session lease renewal
+- **Session and Task Commands**:
+  - `SESSION CREATE` / `SESSION <id> EXISTS` / `SESSION <id> DELETE`
+  - `SESSION <id> TASK CREATE`
+  - `SESSION <id> TASK <task_id> {EXISTS, VALID, PENDING, RUNNING, FINISHED, FAILED, CANCEL, EXECUTE, GET_RESULTS}`
+  - `SESSION <id> TASK <task_id> {SET_TYPE, SET_QUBITS, SET_SIM_TYPE, SET_METHOD, SET_QASM, SET_OBSERVABLES, SET_OPTIONS} <value>`
+  - `PING`
+
+## Documentation
+
+- **[Installation and Deployment Guide](docs/installation.md)** — system packages, building Maestro and `maestro-local-server` from source, `.deb` packaging, systemd configuration, socket permissions, and troubleshooting.
+- **[Client Protocol and Usage Guide](docs/protocol-guide.md)** — end-to-end walkthroughs, command reference tables, and a complete Python client example.
+- **[Native Maestro API v2 Reference](docs/native-api-v2.md)** — request protocol details, option migration table, MPS/MPO tensor diagnostics, gate fusion, GPU plugin upgrade guidance, and supervised MPI launch profiles.
+- **[Worker Process Design](docs/worker-process.md)** — module layout, private IPC protocol, cancellation ordering, and subprocess isolation design.
 
 ## Prerequisites
 
 - Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
 - `libclang` (required by `bindgen` at build time), e.g. `sudo apt install libclang-dev`
-- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library built from source.
+- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library (`libmaestro.so` and `maestrolib/Interface.h`) built from source
 - For building the `.deb` package: `cargo install cargo-deb`
 
-## Local development setup
+See the [Installation and Deployment Guide](docs/installation.md) for full step-by-step instructions.
+
+## Local Development Setup
 
 With the Maestro header at `~/maestro/maestrolib/Interface.h` and a matching
 `libmaestro.so` installed, no Maestro environment variables are required:
@@ -91,7 +116,7 @@ rebuilding Maestro.
 
 The compiled binary is written to `target/release/maestro-local-server`.
 
-### Formatting and linting
+### Formatting and Linting
 
 Before submitting changes, run both checks and resolve all formatting issues,
 warnings, and errors:
@@ -128,18 +153,10 @@ on CPU without GPU plugins. Run it alone with `cargo test --test native_api`.
 GPU hardware verification is described in the
 [native API verification guide](docs/native-api-v2.md#verification).
 
-## Building the .deb package
+## Building and Installing the `.deb` Package
 
 ```bash
 cargo deb
-```
-
-This builds a release binary and packages it, along with the `maestro.service` systemd unit,
-into a `.deb` under `target/debian/`.
-
-## Installing
-
-```bash
 sudo dpkg -i target/debian/maestro-local-server_<version>_<arch>.deb
 ```
 
@@ -152,7 +169,7 @@ sudo systemctl status maestro.service
 sudo systemctl restart maestro.service
 ```
 
-## Uninstalling
+To uninstall:
 
 ```bash
 sudo dpkg -r maestro-local-server
@@ -160,3 +177,26 @@ sudo dpkg -r maestro-local-server
 
 This stops the service and masks the systemd unit before removal. To purge configuration/state
 as well, use `sudo dpkg -P maestro-local-server` instead.
+
+## Contributing and Security
+
+- See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines on reporting bugs, requesting features, and sharing feedback.
+- See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for community standards.
+- See [SECURITY.md](./SECURITY.md) for reporting security vulnerabilities and reviewing deployment security considerations.
+
+## Citation
+
+If you use Maestro or `maestro-local-server` in your research or workflow, please cite:
+
+```bibtex
+@article{bertomeu2025maestro,
+  title={Maestro: Intelligent Execution for Quantum Circuit Simulation},
+  author={Bertomeu, Oriol and Ghayas, Hamzah and Roman, Adrian and DiAdamo, Stephen},
+  organization={Qoro Quantum},
+  year={2025}
+}
+```
+
+## License
+
+GNU General Public License v3.0 (GPL-3.0) with the Maestro Plugin Linking Exception — see [LICENSE](./LICENSE) or <https://www.gnu.org/licenses/gpl-3.0.en.html>.

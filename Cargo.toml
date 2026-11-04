@@ -2,16 +2,26 @@
 name = "maestro-local-server"
 version = "0.1.0"
 edition = "2024"
-description = "Maestro local server"
+description = "Local Unix-socket daemon exposing Maestro quantum circuit simulation"
 authors = ["Qoro Quantum <team@qoroquantum.de>"]
+license = "GPL-3.0-only"
+readme = "README.md"
+homepage = "https://github.com/QoroQuantum/maestro"
+repository = "https://github.com/QoroQuantum/maestro-local-server"
+keywords = ["quantum", "simulation", "maestro", "daemon", "hpc"]
+categories = ["science", "simulation", "command-line-utilities"]
 build = "build.rs"
 
 [package.metadata.deb]
 depends = "$auto, systemd"
-extended-description = "Maestro local server"
+extended-description = """\
+A local daemon that exposes Maestro quantum circuit simulation over a Unix \
+domain socket, supporting isolated per-task worker processes, native JSON API v2 \
+requests, and supervised MPI execution."""
 section = "admin"
 priority = "optional"
-copyright = "© copyright Qoro Quantum"
+copyright = "Copyright (c) 2025-2026 Qoro Quantum Ltd."
+license-file = ["LICENSE", "0"]
 assets = [
     ["target/release/maestro-local-server", "usr/bin/maestro-local-server", "755"],
     ["debian/maestro.service", "lib/systemd/system/maestro.service", "644"]
@@ -21,10 +31,10 @@ maintainer-scripts = "debian/scripts"
 [dependencies]
 libc = "0.2"
 signal-hook = { version = "0.4.4", features = ["extended-siginfo"] }
-json = "*"
-serial_test = { version = "*" }
+json = "0.12"
+
+[dev-dependencies]
+serial_test = "3.5"
 
 [build-dependencies]
-bindgen = "*"
-
-
+bindgen = "0.72"
