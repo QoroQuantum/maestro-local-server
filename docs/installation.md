@@ -11,6 +11,7 @@ This guide covers building, installing, configuring, and verifying `maestro-loca
 - **Rust toolchain** (stable, supporting Rust 2024 edition, Rust 1.85+) — install via [rustup](https://rustup.rs)
 - **`libclang`** — required at build time by `bindgen` to generate Rust FFI bindings from Maestro's C header (`Interface.h`)
 - **[Maestro](https://github.com/QoroQuantum/maestro) C++ shared library (`libmaestro.so`) and headers (`Interface.h`, `InterfaceTypes.h`)** — built from a matching Maestro revision
+- **Boost 1.89 or newer** with the `program_options`, `json`, `container`, and `serialization` libraries — older releases (for example, Boost 1.83 on Ubuntu 24.04) fail to compile Maestro with `call of overloaded 'serialize(double&)' is ambiguous`
 
 ### Installing System Packages
 
@@ -26,11 +27,28 @@ sudo apt-get install -y \
   curl \
   libclang-dev \
   libfftw3-dev \
-  libboost-all-dev \
   libopenblas-dev
 ```
 
-> **Note on Boost:** Maestro requires Boost headers and `program_options`, `json`, `container`, and `serialization` libraries (Boost 1.81+ with `boost_json` support). If your distribution's default `libboost-all-dev` does not include `boost_json`, build or install a newer Boost release into `/usr/local` (see [`.github/workflows/build-and-test.yml`](../.github/workflows/build-and-test.yml) for an automated example).
+Then install Boost. Check the version your distribution provides with `apt-cache policy libboost-all-dev`.
+
+- **Ubuntu 26.04 or newer** (Boost 1.90): install the distribution package:
+
+  ```bash
+  sudo apt-get install -y libboost-all-dev
+  ```
+
+- **Ubuntu 24.04 / 25.10 and other distributions with Boost older than 1.89**: build Boost from source into `/usr/local` (this is what CI does). Do not also install `libboost-all-dev`.
+
+  ```bash
+  cd /tmp
+  curl -L https://archives.boost.io/release/1.90.0/source/boost_1_90_0.tar.gz -o boost_1_90_0.tar.gz
+  tar -xzf boost_1_90_0.tar.gz
+  cd boost_1_90_0
+  ./bootstrap.sh --prefix=/usr/local
+  sudo ./b2 -j"$(nproc)" --with-program_options --with-json --with-container --with-serialization install
+  sudo ldconfig
+  ```
 
 **Fedora / RHEL:**
 
@@ -46,6 +64,8 @@ sudo dnf install -y \
   boost-devel \
   openblas-devel
 ```
+
+Check that `rpm -q boost-devel` reports 1.89 or newer (Fedora 45 ships 1.90). If it is older, remove `boost-devel` from the command and build Boost from source as shown for Ubuntu above.
 
 ### Installing the Rust Toolchain
 
@@ -67,10 +87,15 @@ cd "$HOME/maestro"
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX=/usr/local \
-  -DBUILD_PYTHON_BINDINGS=OFF
+  -DBUILD_PYTHON_BINDINGS=OFF \
+  -DCOMPILE_TESTS=OFF
 
-cmake --build build -j"$(nproc)"
+cmake --build build -j2
 ```
+
+`-DCOMPILE_TESTS=OFF` skips Maestro's own test binaries, which `maestro-local-server` does not need. This roughly halves the build time and memory use.
+
+> **ARM (`aarch64`) hosts:** Qiskit Aer, which is enabled by default, uses x86-only intrinsics and fails to build on ARM with `immintrin.h: No such file or directory`. Add `-DENABLE_QISKIT_AER=OFF` to the `cmake -S . -B build ...` command. The other backends are unaffected.
 
 To install `libmaestro.so` system-wide and register it with the dynamic linker:
 
@@ -81,7 +106,7 @@ echo "/usr/local/lib" | sudo tee -a /etc/ld.so.conf.d/maestro.conf
 sudo ldconfig
 ```
 
-> **Memory Tip:** When compiling Maestro with Qiskit Aer enabled (the default), C++ template instantiation can use several gigabytes of RAM per job. On machines with limited RAM, lower the parallel build count (for example, `cmake --build build -j2` or `-j1`).
+> **Memory Tip:** Each Maestro compile job can use several gigabytes of RAM, more with Qiskit Aer enabled. With 8 GB of RAM, `-j3` runs out of memory, so the command above uses `-j2`. On machines with 32 GB or more, you can raise it (for example, `-j"$(nproc)"`). If the compiler is killed, rerun with `-j1`; the build continues where it stopped.
 
 ---
 
@@ -127,7 +152,7 @@ MAESTRO_LIBRARY_DIR=/opt/maestro/lib \
 cargo build --release
 ```
 
-> **Note:** Cargo tracks only Maestro environment variables that were defined during the build. If you first set a previously unset override after a prior build, run `cargo clean -p maestro-local-server` before rebuilding.
+> **Note:** Cargo tracks only Maestro environment variables that were defined during the build. If you first set a previously unset override after a prior build, run `cargo clean -p maestro-local-server --release` before rebuilding. Without `--release`, Cargo cleans only the debug profile and the release binary keeps its old settings.
 
 The compiled binary is produced at:
 
@@ -167,11 +192,16 @@ target/debian/maestro-local-server_<version>_<arch>.deb
 sudo dpkg -i target/debian/maestro-local-server_*.deb
 ```
 
-The package's post-install script (`debian/scripts/postinst`) unmasks and updates `maestro.service`. To enable and start the service immediately:
+The package's post-install script (`debian/scripts/postinst`) unmasks `maestro.service`, enables it, and starts it. Check that it is running:
+
+```bash
+sudo systemctl status maestro.service
+```
+
+If it is not running (for example, after you disabled it earlier), enable and start it:
 
 ```bash
 sudo systemctl enable --now maestro.service
-sudo systemctl status maestro.service
 ```
 
 ### Step 4: Uninstalling
@@ -228,14 +258,16 @@ You can customize the service without editing `/lib/systemd/system/maestro.servi
 sudo systemctl edit maestro.service
 ```
 
-Add any required environment variables under `[Service]`:
+Add any required environment variables under `[Service]`. The example below sets the session lease to two hours:
 
 ```ini
 [Service]
-Environment="MAESTRO_SOCKET=/run/maestro.sock"
-Environment="MAESTRO_SESSION_LEASE_SECONDS=3600"
-Environment="MAESTRO_MPI_PROFILES=/etc/maestro/mpi-profiles.json"
-Environment="LD_LIBRARY_PATH=/usr/local/lib:/usr/local"
+Environment="MAESTRO_SESSION_LEASE_SECONDS=7200"
+# Only set this once the file exists. If MAESTRO_MPI_PROFILES points to a
+# missing or invalid file, the capabilities command fails with invalid_config.
+#Environment="MAESTRO_MPI_PROFILES=/etc/maestro/mpi-profiles.json"
+# Not needed when libmaestro.so is registered with ldconfig (section 2).
+#Environment="LD_LIBRARY_PATH=/usr/local/lib:/usr/local"
 ```
 
 Then reload and restart:
@@ -249,7 +281,7 @@ sudo systemctl restart maestro.service
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MAESTRO_SOCKET` | `/run/maestro.sock` (or `/tmp/maestro.sock` in test mode) | Path to the Unix domain socket created by the daemon. |
+| `MAESTRO_SOCKET` | `/run/maestro.sock` | Path to the Unix domain socket created by the daemon. (The `cargo test` suite uses `/tmp/maestro.sock`.) |
 | `MAESTRO_SESSION_LEASE_SECONDS` | `3600` | Positive integer setting the idle session lease duration in seconds. Sessions expire after `5 * MAESTRO_SESSION_LEASE_SECONDS` ticks (at 200 ms per tick, i.e., `MAESTRO_SESSION_LEASE_SECONDS` seconds) without activity. |
 | `MAESTRO_MPI_PROFILES` | *(unset)* | Path to an administrator-owned JSON file defining allowed MPI launch profiles (`mpirun` or `srun`). See [Native MPI profiles](native-api-v2.md#native-mpi-profiles). |
 
@@ -273,7 +305,7 @@ sudo -u root -g users ./target/release/maestro-local-server
 
 ## 7. Verifying the Installation
 
-Once the daemon is running, verify connectivity over the Unix socket using `nc` (OpenBSD netcat) or `socat`:
+Once the daemon is running, verify connectivity over the Unix socket using `nc` from OpenBSD netcat (`sudo apt-get install -y netcat-openbsd`) or `socat` (`sudo apt-get install -y socat`). The examples below use `nc`; with `socat`, replace `nc -U -N /run/maestro.sock` with `socat - UNIX-CONNECT:/run/maestro.sock`.
 
 ### 1. Liveness Check (`PING`)
 
@@ -310,6 +342,18 @@ Verify that `"ok":true` is returned and inspect `server.build` and `native.backe
 ---
 
 ## 8. Troubleshooting
+
+### `call of overloaded 'serialize(double&)' is ambiguous` while building Maestro
+
+Maestro was configured against a Boost release older than 1.89. Build Boost 1.90 from source into `/usr/local` as shown in [section 1](#installing-system-packages), then delete Maestro's `build` directory and configure again so CMake picks up the new Boost.
+
+### `fatal error: immintrin.h: No such file or directory` while building Maestro
+
+You are building on an ARM (`aarch64`) host with Qiskit Aer enabled. Aer's sources use x86-only intrinsics. Configure Maestro with `-DENABLE_QISKIT_AER=OFF` (see [section 2](#2-building-and-installing-the-maestro-c-library)).
+
+### `c++: fatal error: Killed signal terminated program cc1plus` while building Maestro
+
+The compiler ran out of memory. Lower the parallel job count (for example, `cmake --build build -j2` or `-j1`) and run the build command again. It continues where it stopped.
 
 ### `error while loading shared libraries: libmaestro.so: cannot open shared object file`
 

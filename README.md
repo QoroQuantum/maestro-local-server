@@ -52,7 +52,7 @@ The server accepts newline-terminated commands in two protocol families on the s
 
 - Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
 - `libclang` (required by `bindgen` at build time), e.g. `sudo apt install libclang-dev`
-- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library (`libmaestro.so` and `maestrolib/Interface.h`) built from source
+- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library (`libmaestro.so` and `maestrolib/Interface.h`) built from source, which needs Boost 1.89 or newer (Ubuntu 24.04's packaged Boost 1.83 is too old)
 - For building the `.deb` package: `cargo install cargo-deb`
 
 See the [Installation and Deployment Guide](docs/installation.md) for full step-by-step instructions.
@@ -88,7 +88,8 @@ server binary's runtime search path. Invalid explicit paths report an error.
 Cargo environment-change tracking is emitted only for defined Maestro variables.
 `HOME` is tracked only when it supplies the default header location. When setting
 a previously unset override after a successful build, use
-`cargo clean -p maestro-local-server` before rebuilding so Cargo reads the new
+`cargo clean -p maestro-local-server --release` (or drop `--release` for debug
+builds) before rebuilding so Cargo reads the new
 setting. Changes to already tracked variables or the selected header trigger
 rebuilds normally.
 
