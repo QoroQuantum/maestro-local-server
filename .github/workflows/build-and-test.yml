@@ -24,6 +24,10 @@ env:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      # ccache 4 otherwise writes to ~/.cache/ccache unless ~/.ccache already
+      # exists, so the cached directory must be named explicitly.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
     steps:
       - name: Checkout maestro-local-server
         uses: actions/checkout@v5
@@ -53,9 +57,9 @@ jobs:
       # Installed straight into /usr/local (a standard search path) rather
       # than a self-contained prefix, so no extra linker configuration is
       # needed for Boost's shared libraries at test-run time.
-      - name: Cache Boost
+      - name: Restore Boost
         id: cache-boost
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             /usr/local/include/boost
@@ -72,10 +76,22 @@ jobs:
           ./bootstrap.sh --prefix=/usr/local
           sudo ./b2 -j$(nproc) --with-program_options --with-json --with-container --with-serialization install
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      # Caches are saved as soon as their build succeeds, not at the end of the
+      # job, so a failing test does not cost the next run its caches.
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
-          path: ~/.ccache
+          path: |
+            /usr/local/include/boost
+            /usr/local/lib/libboost*
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Restore ccache
+        id: cache-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-maestro-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             ccache-maestro-${{ runner.os }}-
@@ -103,6 +119,18 @@ jobs:
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         run: cmake --build build -j1
 
+      - name: Show ccache statistics
+        if: ${{ !cancelled() }}
+        run: ccache --show-stats
+
+      # Also after a failed build: the objects compiled before it still help.
+      - name: Save ccache
+        if: ${{ !cancelled() && steps.cache-ccache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.cache-ccache.outputs.cache-primary-key }}
+
       # libmaestro.so installs directly to /usr/local (not /usr/local/lib),
       # which ubuntu-latest runners don't scan by default, so the dynamic
       # linker needs to be told about it explicitly.
@@ -128,6 +156,9 @@ jobs:
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # Saved at the end of the job, even when a test failed.
+          cache-on-failure: true
 
       - name: Build
         env:
@@ -158,8 +189,23 @@ jobs:
           test "$(git -C "$QRMI_DIR" rev-parse HEAD)" = "$QRMI_REF"
           echo "QRMI_DIR=$QRMI_DIR" >> "$GITHUB_ENV"
 
+      # Its session tests need a running server. There is none at the default
+      # /run/maestro.sock here, so they use this build on a private socket.
       - name: Test QRMI's Maestro client
-        run: cargo test --locked --manifest-path "$QRMI_DIR/Cargo.toml" -p maestro-local-api
+        env:
+          MAESTRO_SOCKET: ${{ runner.temp }}/maestro-client.sock
+          QRMI_MAESTRO_SOCKET: ${{ runner.temp }}/maestro-client.sock
+        run: |
+          target/debug/maestro-local-server &
+          server=$!
+          trap 'kill "$server"; wait "$server"' EXIT
+          for _ in $(seq 300); do
+            [ -S "$QRMI_MAESTRO_SOCKET" ] && break
+            kill -0 "$server"
+            sleep 0.1
+          done
+          test -S "$QRMI_MAESTRO_SOCKET"
+          cargo test --locked --manifest-path "$QRMI_DIR/Cargo.toml" -p maestro-local-api
 
       - name: Set up Python
         uses: actions/setup-python@v5
