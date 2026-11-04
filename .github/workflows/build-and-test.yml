@@ -158,8 +158,23 @@ jobs:
           test "$(git -C "$QRMI_DIR" rev-parse HEAD)" = "$QRMI_REF"
           echo "QRMI_DIR=$QRMI_DIR" >> "$GITHUB_ENV"
 
+      # Its session tests need a running server. There is none at the default
+      # /run/maestro.sock here, so they use this build on a private socket.
       - name: Test QRMI's Maestro client
-        run: cargo test --locked --manifest-path "$QRMI_DIR/Cargo.toml" -p maestro-local-api
+        env:
+          MAESTRO_SOCKET: ${{ runner.temp }}/maestro-client.sock
+          QRMI_MAESTRO_SOCKET: ${{ runner.temp }}/maestro-client.sock
+        run: |
+          target/debug/maestro-local-server &
+          server=$!
+          trap 'kill "$server"; wait "$server"' EXIT
+          for _ in $(seq 300); do
+            [ -S "$QRMI_MAESTRO_SOCKET" ] && break
+            kill -0 "$server"
+            sleep 0.1
+          done
+          test -S "$QRMI_MAESTRO_SOCKET"
+          cargo test --locked --manifest-path "$QRMI_DIR/Cargo.toml" -p maestro-local-api
 
       - name: Set up Python
         uses: actions/setup-python@v5
