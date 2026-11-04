@@ -9,6 +9,11 @@ on:
 
 env:
   BOOST_VERSION: 1.90.0
+  # Maestro commit this server is tested against. Update it together with
+  # server changes that rely on newer native features; the native API tests
+  # require its adjoint, mirror-observable (including mixed-state methods) and
+  # instruction-noise support, readout refusal, and whole-document result bound.
+  MAESTRO_REF: 3cbe325582a0394481293b034929d6f2a5249356
 
 jobs:
   build-and-test:
@@ -24,8 +29,17 @@ jobs:
           echo "maestro_dir=$MAESTRO_DIR" >> "$GITHUB_OUTPUT"
           echo "boost_dir=boost_$(echo ${{ env.BOOST_VERSION }} | tr . _)" >> "$GITHUB_OUTPUT"
 
+      # A pinned commit keeps CI reproducible: upstream Maestro changes cannot
+      # break or silently change this build until MAESTRO_REF is updated.
       - name: Checkout Maestro C++ library
-        run: git clone --depth 1 https://github.com/QoroQuantum/maestro.git "${{ steps.paths.outputs.maestro_dir }}"
+        env:
+          MAESTRO_DIR: ${{ steps.paths.outputs.maestro_dir }}
+        run: |
+          git init -q "$MAESTRO_DIR"
+          git -C "$MAESTRO_DIR" remote add origin https://github.com/QoroQuantum/maestro.git
+          git -C "$MAESTRO_DIR" fetch --depth 1 origin "$MAESTRO_REF"
+          git -C "$MAESTRO_DIR" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$MAESTRO_DIR" rev-parse HEAD)" = "$MAESTRO_REF"
 
       - name: Install system build tools
         run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build ccache libclang-dev libopenblas-dev

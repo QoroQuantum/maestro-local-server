@@ -189,6 +189,16 @@ pub fn capabilities() -> String {
     native_json(|| unsafe { MaestroGetCapabilitiesJson() })
 }
 
+/// Build identity of the Maestro library loaded by this process. A worker can
+/// load a newer library than a long-running daemon after an upgrade.
+pub fn native_build() -> Option<json::JsonValue> {
+    let catalog = json::parse(&capabilities()).ok()?;
+    let build = &catalog["build"];
+    (build["version"].is_string() && build["source_revision"].is_string()).then(|| {
+        json::object! {version: build["version"].clone(), source_revision: build["source_revision"].clone()}
+    })
+}
+
 pub fn validate_request(request: &str) -> String {
     match CString::new(request) {
         Ok(request) => native_json(|| unsafe { MaestroValidateRequestJson(request.as_ptr()) }),

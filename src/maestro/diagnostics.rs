@@ -45,6 +45,8 @@ pub(super) struct TaskDiagnostics {
     pub output: Arc<Mutex<CapturedOutput>>,
     pub error: Option<String>,
     pub context: json::JsonValue,
+    // Build of the Maestro library that ran the task, reported by its worker.
+    pub native_build: Option<json::JsonValue>,
     seeds: Vec<json::JsonValue>,
     seeds_truncated: bool,
     events: Vec<json::JsonValue>,
@@ -57,6 +59,7 @@ impl Default for TaskDiagnostics {
             output: Arc::default(),
             error: None,
             context: json::object! {},
+            native_build: None,
             seeds: Vec::new(),
             seeds_truncated: false,
             events: Vec::new(),
@@ -138,6 +141,7 @@ impl TaskDiagnostics {
             logs_omitted_bytes: output.omitted,
             error: error, failure_message: self.error.clone(),
             context: self.context.clone(), events: self.events.clone(),
+            native_build: self.native_build.clone().unwrap_or(json::JsonValue::Null),
             events_truncated: self.events_truncated,
             seeds: self.seeds.clone(), seeds_truncated: self.seeds_truncated,
         }
@@ -180,7 +184,7 @@ const MESSAGE_BYTES: usize = 8192;
 const MAX_CAUSES: usize = 4;
 const MAX_DEPTH: usize = 3;
 
-fn bounded(value: &str, limit: usize) -> String {
+pub(super) fn bounded(value: &str, limit: usize) -> String {
     if value.len() <= limit {
         return value.to_owned();
     }

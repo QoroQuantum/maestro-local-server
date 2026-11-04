@@ -6,7 +6,7 @@
 
 mod protocol;
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
@@ -76,6 +76,7 @@ struct Process {
 #[derive(Debug, Default)]
 pub struct Execution {
     cancelled: AtomicBool,
+    native_build: Mutex<Option<json::JsonValue>>,
     process: Mutex<Process>,
     pub(super) logs: Arc<Mutex<diagnostics::CapturedOutput>>,
     stop_logs: Arc<AtomicBool>,
@@ -103,6 +104,11 @@ impl Execution {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Build of the native library reported by the worker with its result.
+    pub fn native_build(&self) -> Option<json::JsonValue> {
+        self.native_build.lock().unwrap().clone()
     }
 
     /// Returns only after the child has exited and has been reaped. A request
@@ -380,7 +386,11 @@ fn execute_with_command(task: &Task, execution: &Execution, mut command: Command
         execution
             .phase
             .store(Phase::ReadingResult as u8, Ordering::SeqCst);
-        let result = protocol::read_result(&mut socket, task)?;
+        let protocol::WorkerResult {
+            result,
+            native_build,
+        } = protocol::read_result(&mut socket, task)?;
+        *execution.native_build.lock().unwrap() = native_build;
         let status = execution.wait()?;
         if !status.success() {
             if let Some(error) = diagnostics::native_error(&result) {
@@ -478,17 +488,21 @@ pub fn run() -> Result<(), Failure> {
                 "Cancelled before launch",
             ));
         }
-        let result = if matches!(task.task_type, super::runner::TaskType::Request)
-            && json::parse(&task.qasm).is_ok_and(|value| value["launch"].is_object())
-        {
+        let mpi = matches!(task.task_type, super::runner::TaskType::Request)
+            && json::parse(&task.qasm).is_ok_and(|value| value["launch"].is_object());
+        let result = if mpi {
             match super::mpi::run(&task.qasm, &signals.cancelled, &mut cleanup_confirmed) {
                 Ok(result) => result,
                 Err(error) if !cleanup_confirmed => {
                     let error = diagnostics::with_causes(error, "cleanup_unconfirmed", &[]);
                     // Publish diagnostics even when cleanup is uncertain. The
                     // nonzero exit still prevents successful task/cancel ACKs.
-                    let _ =
-                        protocol::write_result(&mut socket, &task, &diagnostics::envelope(&error));
+                    let _ = protocol::write_result(
+                        &mut socket,
+                        &task,
+                        &diagnostics::envelope(&error),
+                        None,
+                    );
                     return Err(error);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
@@ -506,12 +520,46 @@ pub fn run() -> Result<(), Failure> {
         if result.is_empty() {
             return Err(io::Error::other("Maestro returned an empty result"));
         }
-        protocol::write_result(&mut socket, &task, &result)
+        // MPI ranks load maestro-mpi-worker's library, not this worker's.
+        let build = if mpi {
+            None
+        } else {
+            super::simulators::native_build()
+        };
+        send_result(&mut socket, &task, &result, build.as_ref())
     })();
     result.map_err(|error| Failure {
         error,
         cleanup_confirmed,
     })
+}
+
+/// Sends the result, or a structured failure when it exceeds the server's result
+/// limit, so the parent reports the reason instead of a closed socket. The
+/// returned error then makes the worker exit nonzero.
+fn send_result(
+    socket: &mut impl Write,
+    task: &Task,
+    result: &str,
+    build: Option<&json::JsonValue>,
+) -> io::Result<()> {
+    if result.len() <= super::api::MAX_RESULT_BYTES {
+        return protocol::write_result(socket, task, result, build);
+    }
+    let error = diagnostics::with_causes(
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Result of {} bytes exceeds the server result limit of {} bytes",
+                result.len(),
+                super::api::MAX_RESULT_BYTES
+            ),
+        ),
+        "invalid_input",
+        &[],
+    );
+    protocol::write_result(socket, task, &diagnostics::envelope(&error), None)?;
+    Err(error)
 }
 
 #[cfg(test)]
