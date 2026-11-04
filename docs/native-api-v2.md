@@ -477,9 +477,10 @@ blocked. Deterministic cancellation tests cover startup, partial upload, in-flig
 launchers, completed launchers, post-cleanup response loss and failed Slurm cleanup.
 Boundary tests exercise oversized versioned and legacy frames, and a quote-heavy
 result at exactly the result bound. Mock launchers do
-not require MPI hardware. QRMI's opt-in native
-integration suite starts a private instance of this daemon and exercises the full
-client/adapter path. Maestro CTest additionally covers two-rank native MPI
+not require MPI hardware. QRMI's native integration suite starts a private
+instance of this daemon and exercises the full client/adapter path. CI runs it on
+CPU from the QRMI commit pinned as `QRMI_REF`, requiring rather than skipping the
+native binaries; QRMI and Maestro are public, so no credentials are stored. Maestro CTest additionally covers two-rank native MPI
 success/failure and optional local and MPI GPU distribution. The server CI build
 enables Maestro's native request contract suite, `expectation_batches`,
 `tensor_dispatch_current`, `tensor_dispatch_legacy`, `fusion_interface_wrappers`,

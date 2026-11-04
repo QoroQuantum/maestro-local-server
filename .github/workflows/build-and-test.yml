@@ -14,6 +14,10 @@ env:
   # require its adjoint, mirror-observable (including mixed-state methods) and
   # instruction-noise support, readout refusal, and whole-document result bound.
   MAESTRO_REF: 3cbe325582a0394481293b034929d6f2a5249356
+  # QRMI commit whose native integration suite exercises the full
+  # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
+  # needs no stored credentials. Update it with QRMI's Maestro client changes.
+  QRMI_REF: ce8a2fc3881b82b1998b903ff8075e7b8042001b
 
 jobs:
   build-and-test:
@@ -143,3 +147,37 @@ jobs:
         env:
           MAESTRO_DIR: ${{ steps.paths.outputs.maestro_dir }}
         run: cargo test --verbose
+
+      - name: Check out QRMI
+        run: |
+          QRMI_DIR="$RUNNER_TEMP/qrmi"
+          git init -q "$QRMI_DIR"
+          git -C "$QRMI_DIR" remote add origin https://github.com/QoroQuantum/qrmi.git
+          git -C "$QRMI_DIR" fetch --depth 1 origin "$QRMI_REF"
+          git -C "$QRMI_DIR" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$QRMI_DIR" rev-parse HEAD)" = "$QRMI_REF"
+          echo "QRMI_DIR=$QRMI_DIR" >> "$GITHUB_ENV"
+
+      - name: Test QRMI's Maestro client
+        run: cargo test --locked --manifest-path "$QRMI_DIR/Cargo.toml" -p maestro-local-api
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A dev-profile extension builds faster; these tests are not timing-bound.
+      - name: Install QRMI
+        env:
+          MATURIN_PEP517_ARGS: --profile dev
+        run: pip install -e "$QRMI_DIR" pytest
+
+      # Fails, rather than skips, if either native binary is missing.
+      - name: Test QRMI through this server and Maestro
+        timeout-minutes: 20
+        working-directory: ${{ runner.temp }}/qrmi
+        env:
+          QRMI_REQUIRE_MAESTRO_NATIVE: "1"
+          QRMI_TEST_MAESTRO_SERVER: ${{ github.workspace }}/target/debug/maestro-local-server
+          QRMI_TEST_MAESTRO_REQUEST: ${{ steps.paths.outputs.maestro_dir }}/build/bin/maestro-request
+        run: pytest -rs python/tests/unit/quantum_resource/test_maestro_native_integration.py
