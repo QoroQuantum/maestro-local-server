@@ -57,6 +57,11 @@ jobs:
       # Installed straight into /usr/local (a standard search path) rather
       # than a self-contained prefix, so no extra linker configuration is
       # needed for Boost's shared libraries at test-run time.
+      # The cache action extracts as the runner user, but these directories are
+      # root-owned, so a restore previously failed and Boost was always rebuilt.
+      - name: Allow restoring Boost into /usr/local
+        run: sudo chown "$(id -u):$(id -g)" /usr/local/include /usr/local/lib
+
       - name: Restore Boost
         id: cache-boost
         uses: actions/cache/restore@v4
@@ -99,6 +104,9 @@ jobs:
       # Let Maestro fetch its pinned Aer revision, including its threading fixes.
       # A permanently cached external checkout would override that dependency pin.
       # Aer remains enabled for the legacy backend-selection assertions.
+      # MAESTRO_BUILD_REQUEST_TESTS enables every Maestro test run below.
+      # COMPILE_TESTS would add Maestro's own unit-test programs, which this
+      # workflow never runs; tests/Tests.cpp alone took 7 minutes to compile.
       - name: Configure Maestro
         working-directory: ${{ steps.paths.outputs.maestro_dir }}
         env:
@@ -108,6 +116,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DBUILD_PYTHON_BINDINGS=OFF \
+            -DCOMPILE_TESTS=OFF \
             -DMAESTRO_BUILD_REQUEST_TESTS=ON \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache
