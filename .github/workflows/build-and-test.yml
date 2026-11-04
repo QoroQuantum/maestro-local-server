@@ -11,13 +11,15 @@ env:
   BOOST_VERSION: 1.90.0
   # Maestro commit this server is tested against. Update it together with
   # server changes that rely on newer native features; the native API tests
-  # require its adjoint, mirror-observable (including mixed-state methods) and
-  # instruction-noise support, readout refusal, and whole-document result bound.
-  MAESTRO_REF: 3cbe325582a0394481293b034929d6f2a5249356
+  # require its adjoint, mirror-observable (including mixed-state methods),
+  # mixed-state overlap/fidelity and instruction-noise support, readout refusal
+  # (including checkpoint prefixes), and whole-document result bound. Its
+  # network_jobs test also passes on this 2-core runner.
+  MAESTRO_REF: 0ef2937c5f791f9855717ea42e439c22bf9765b7
   # QRMI commit whose native integration suite exercises the full
   # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
   # needs no stored credentials. Update it with QRMI's Maestro client changes.
-  QRMI_REF: ce8a2fc3881b82b1998b903ff8075e7b8042001b
+  QRMI_REF: 278ae9e6a94cc84872f51fb173df255ebb16cd86
 
 jobs:
   build-and-test:
