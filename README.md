@@ -32,7 +32,7 @@ The server accepts newline-terminated commands in two protocol families on the s
   - `API {"version":2,"command":"status"}` — runner health and queue status
   - `API {"version":2,"command":"capabilities"}` — native backend/method/option catalog, build metadata, and MPI profiles
   - `API {"version":2,"command":"submit","session_id":<id>,"request":{...}}` — atomic validation and submission of native schema v2 requests
-  - `API {"version":2,"command":"logs","session_id":<id>,"task_id":<task_id>}` — retained stdout/stderr, lifecycle events, seeds, and structured errors
+  - `API {"version":2,"command":"logs","session_id":<id>,"task_id":<task_id>}` — retained stdout/stderr, lifecycle events, seeds, structured errors, and the Maestro build that ran the task
   - `API {"version":2,"command":"keepalive","session_id":<id>}` — session lease renewal
 - **Session and Task Commands**:
   - `SESSION CREATE` / `SESSION <id> EXISTS` / `SESSION <id> DELETE`

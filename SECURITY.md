@@ -29,7 +29,7 @@ We will acknowledge receipt of your report promptly, investigate the issue, and 
 
 2. **Isolated Worker Processes**:
    - Circuit validation and task execution run in isolated child worker processes (`maestro-local-server --worker`) rather than inside the long-lived daemon process, preventing parser or simulator crashes from corrupting daemon state.
-   - Request frames are bounded to 16 MiB and private worker/result frames to 64 MiB.
+   - Request frames are bounded to 16 MiB (`server.max_request_bytes`), private worker frames to 64 MiB, and task results to 64 MiB plus 64 KiB of metadata headroom (`server.max_result_bytes`).
    - Idle sessions automatically expire according to `MAESTRO_SESSION_LEASE_SECONDS` (default: 3600 seconds), terminating any active worker process group.
 
 3. **MPI Launch Profiles (`MAESTRO_MPI_PROFILES`)**:

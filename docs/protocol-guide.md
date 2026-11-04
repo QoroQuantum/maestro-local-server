@@ -45,7 +45,7 @@ A typical workflow using the Native JSON API v2 combines `API` commands with `SE
 6. **(Optional) Inspect retained task logs, lifecycle events, and seeds**:
    ```text
    -> API {"version":2,"command":"logs","session_id":0,"task_id":0}
-   <- OK {"context":{"operation":"execute"},"events":[{"state":"queued",...},{"state":"started",...},{"state":"completed",...}],"failure":null,"failure_message":null,"logs":"","logs_omitted_bytes":0,"logs_truncated":false,"ok":true,"seeds":[...],"session_id":0,"task_id":0,"version":2}
+   <- OK {"session_id":0,"task_id":0,"logs":"","logs_truncated":false,"logs_omitted_bytes":0,"error":null,"failure_message":null,"context":{...},"events":[...],"native_build":{"version":"...","source_revision":"..."},"events_truncated":false,"seeds":[...],"seeds_truncated":false,"version":2,"ok":true}
    ```
 7. **Delete the session when done**:
    ```text
@@ -74,7 +74,7 @@ All transport responses have the form `OK <json>\n`; inspect the JSON `"ok"` boo
 | `"capabilities"` | `"version": 2` | No | Returns the full native Maestro capability catalog (`native`), server commands, build version/revision, session lease duration, and configured MPI profiles (`server`). |
 | `"submit"` | `"version": 2`, `"session_id"`, `"request"` | Yes | Atomically validates and enqueues a native Maestro request (schema version 2) in an isolated worker. Returns `{"version":2,"ok":true,"task_id":<id>}`. |
 | `"keepalive"` | `"version": 2`, `"session_id"` | Yes | Resets the idle expiration timer for `"session_id"`. |
-| `"logs"` | `"version": 2`, `"session_id"`, `"task_id"` | Yes | Returns bounded stdout/stderr (`logs`), lifecycle `events`, `context`, resolved `seeds`, and structured `failure` details for `"task_id"`. Remains available after `GET_RESULTS` or `CANCEL` until session deletion/expiration. |
+| `"logs"` | `"version": 2`, `"session_id"`, `"task_id"` | Yes | Returns bounded stdout/stderr (`logs`), lifecycle `events`, `context`, resolved `seeds`, structured `error` details, and the `native_build` (Maestro version and revision) that ran `"task_id"`. Remains available after `GET_RESULTS` or `CANCEL` until session deletion/expiration. |
 
 ### Session Management Commands
 
