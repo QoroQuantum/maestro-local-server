@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 const RESULT_PREFIX: &str = "MAESTRO_RESULT_V2 ";
 const STEP_PREFIX: &str = "MAESTRO_STEP_V2 ";
-const MAX_RESULT: u64 = 64 * 1024 * 1024;
+// A result line carries its prefix before a result of at most MAX_RESULT_BYTES.
+const MAX_LINE: usize = RESULT_PREFIX.len() + super::api::MAX_RESULT_BYTES;
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(20);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -536,7 +537,7 @@ fn run_profile_tracked(
                                     eprintln!("{text}");
                                 }
                                 line.clear();
-                            } else if line.len() < MAX_RESULT as usize {
+                            } else if line.len() < MAX_LINE {
                                 line.push(*byte);
                             } else {
                                 record_failure(&mut stop, invalid("MPI result exceeds size limit"));

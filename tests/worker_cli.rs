@@ -43,7 +43,7 @@ fn same_binary_worker_executes_and_estimates_without_starting_daemon() {
             true
         );
         let request = json::object! {
-            version: 1, session_id: 42, task_id: 7, task_type: task_type,
+            version: 2, session_id: 42, task_id: 7, task_type: task_type,
             qasm: "OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nx q[0];\nmeasure q[0]->c[0];",
             observables: "Z", nr_qubits: 1, sim_type: 1, method: 1,
             options: "{\n\"shots\": 10\n}",
@@ -53,17 +53,23 @@ fn same_binary_worker_executes_and_estimates_without_starting_daemon() {
             .write_all(&(request.len() as u64).to_be_bytes())
             .unwrap();
         socket.write_all(request.as_bytes()).unwrap();
-        let mut header = [0; 8];
-        socket.read_exact(&mut header).unwrap();
-        let mut response = String::new();
-        socket
-            .take(u64::from_be_bytes(header))
-            .read_to_string(&mut response)
-            .unwrap();
-        let response = json::parse(&response).unwrap();
+        // A JSON header frame identifies the task; the raw result frame follows.
+        let mut frame = || {
+            let mut header = [0; 8];
+            socket.read_exact(&mut header).unwrap();
+            let mut payload = String::new();
+            (&mut socket)
+                .take(u64::from_be_bytes(header))
+                .read_to_string(&mut payload)
+                .unwrap();
+            json::parse(&payload).unwrap()
+        };
+        let response = frame();
+        assert_eq!(response["version"].as_u32(), Some(2));
         assert_eq!(response["session_id"].as_u32(), Some(42));
         assert_eq!(response["task_id"].as_u32(), Some(7));
-        let result = json::parse(response["result"].as_str().unwrap()).unwrap();
+        assert!(response["result"].is_null());
+        let result = frame();
         if task_type == "execute" {
             assert_eq!(result["counts"]["1"].as_u32(), Some(10));
         } else {

@@ -3,6 +3,10 @@ use super::{mpi, runner::Runner, sessions::SessionManager, simulators, worker};
 use std::sync::Arc;
 
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// Largest task result the server carries. Maestro bounds a whole native result
+/// document by its 64 MiB `max_result_bytes`; the headroom covers the metadata
+/// an MPI worker appends. A reply adds only `OK ` and a newline.
+pub const MAX_RESULT_BYTES: usize = 64 * 1024 * 1024 + 64 * 1024;
 pub const VERSION: u32 = 2;
 
 pub fn session_lease_seconds() -> u32 {
@@ -94,6 +98,7 @@ fn dispatch(
                 build: {version: env!("CARGO_PKG_VERSION"), source_revision: env!("MAESTRO_SERVER_REVISION")},
                 session_lease_seconds: session_lease_seconds(),
                 max_request_bytes: MAX_REQUEST_BYTES,
+                max_result_bytes: MAX_RESULT_BYTES,
                 execution: "native_worker_process",
                 mpi_profiles: profiles,
             }

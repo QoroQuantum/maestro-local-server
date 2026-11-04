@@ -274,6 +274,7 @@ impl Runner {
                 record.error = failure;
                 let mut results = self.results_map.lock().unwrap();
                 if let Some(diagnostic) = self.task_diagnostics.lock().unwrap().get_mut(&key) {
+                    diagnostic.native_build = execution.native_build();
                     if record.error.is_none() {
                         diagnostic.record_result(&record.result);
                     }

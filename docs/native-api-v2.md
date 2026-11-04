@@ -54,7 +54,7 @@ legacy command framing is unchanged. Invalid native validation envelopes become
 `native_failure`, including missing/nonstring error codes or messages.
 
 Capabilities contain the native operation/backend/method/option/noise catalog,
-server commands, lease duration, transport bound, and configured MPI profile names
+server commands, lease duration, request and result bounds, and configured MPI profile names
 and prerequisites. Compiled plugin support is distinct from runtime readiness.
 Diagnostics contain bounded stdout/stderr, `failure_message`, and the structured
 native error when available. They remain available after result consumption and
@@ -98,11 +98,22 @@ Additional diagnostic fields are additive within API v2:
   optional `noise_seed`, and `result_path`. The path is empty for an ordinary
   request; for nested batches its indices select successive `results` members.
   Apply the saved values as `execution.seed` and `noise.seed` on the corresponding
-  original request to replay it with the same backend and configuration.
+  original request to replay it with the same backend, configuration and native
+  library build (`native_build` below). Seeded samples are reproducible only
+  within one Maestro build: for example, Maestro 0.3.8 changed qubit compaction
+  and 0.3.9 disabled compiler multiply-add contraction, so earlier seeds can give
+  different samples (with the same distributions) on a newer library.
   Checkpoint batches retain their shared parent seed. Validation and results
-  without a reported seed add no entries. At most 256 entries and four batch
-  levels are retained; `seeds_truncated` indicates unvisited results. This seed
-  history has the same lifetime as the other diagnostics, not disk persistence.
+  without a reported seed add no entries; deterministic adjoint results have no
+  seed. At most 256 entries and four batch levels are retained; `seeds_truncated`
+  indicates unvisited results. This seed history has the same lifetime as the
+  other diagnostics, not disk persistence.
+- `native_build` is `{version, source_revision}` of the Maestro library loaded by
+  the worker that ran the task, as reported by that worker, or `null` when
+  unknown (queued or cancelled before a result, or an MPI task, whose ranks load
+  the separate `maestro-mpi-worker` library). Workers are fresh processes, so
+  after replacing `libmaestro.so` this can differ from the daemon's own
+  `native.build` until the daemon restarts. Each string is capped at 256 bytes.
 
 `ok:true` means log retrieval succeeded, including for a failed or cancelled task.
 Cancelled tasks still have no legacy result/status record; retained diagnostics
@@ -129,7 +140,11 @@ logs after result consumption. Session `EXISTS` and capability queries do not.
 Clients of long-running jobs must continue actual status polling, logs or keepalive
 comfortably within the lease interval; locally cached status does not send traffic.
 No automatic client heartbeat is implied. Expiration cancels the worker. Requests
-are bounded to 16 MiB, replies/private worker frames to 64 MiB.
+are bounded to 16 MiB (`server.max_request_bytes`). Task results are bounded by
+`server.max_result_bytes`: Maestro's 64 MiB `max_result_bytes`, which covers a
+whole native result document, plus 64 KiB of headroom for metadata an MPI worker
+appends. A result reply adds only `OK ` and a newline, so clients should accept a
+line of `server.max_result_bytes` plus that framing.
 
 Ordinary execution and validation workers are fresh copies of the Rust daemon
 executable launched with `--worker`; they call the native Maestro C ABI. MPI
@@ -166,9 +181,47 @@ Recent Maestro releases changed these keys under `request.simulator.options`:
 For SVD migration, select the solver whose old flag was true; omit the new option
 when all old flags were false. Do not send old and new keys together. Precision
 applies to the supported Aer/GPU backends, and SVD selectors to the corresponding
-GPU tensor method. QCSim computes in double precision. CPU Pauli propagation also
-accepts `pp_workers` (0 through 1024) and `pp_sampling_cache_nodes` (nonnegative).
-The default Pauli deduplication cadence is 10 operations.
+GPU tensor method. QCSim computes in double precision. The default Pauli
+deduplication cadence is 10 operations.
+
+Newer Maestro releases add these options. Ranges and applicability come from the
+loaded library's `native.options` entries (`enum`, `default`, `minimum`,
+`maximum`, `exclusiveMinimum`, per-backend `constraints` and
+`supported_configurations`); validation remains authoritative for cross-field
+rules:
+
+| Option(s) | Applies to | Values and constraints |
+| --- | --- | --- |
+| `pp_workers` | QCSim and GPU Pauli propagation | QCSim 0–1024; GPU 1–64 (default 1), advertised as a `gpu` constraint |
+| `pp_sampling_cache_nodes` | QCSim and GPU Pauli propagation | Nonnegative (GPU default 8192; zero disables the cache) |
+| `pp_memory_limit_bytes` | GPU Pauli propagation only | Positive budget (default 90% of free GPU memory); a limit, not a reservation |
+| `pp_max_fused_gates` | GPU Pauli propagation only | 1–256 (default 64; one disables fusion) |
+| `mps_routing_strategy` | QCSim MPS/MPO only | `legacy` (default) or opt-in `combined`; `current` is rejected |
+| `mps_routing_virtual_bonds`, `mps_routing_truncation_weight`, `mps_routing_legacy_cap` | QCSim and GPU MPS/MPO | Boolean, nonnegative number, boolean; experimental virtual-bond routing |
+| `auto_reduce`, `enable_causal_cone_reduction`, `enable_observable_clustering` | All | Booleans, default true; estimation reductions |
+| `max_cluster_qubits`, `min_cluster_qubits` | All | Positive; `min_cluster_qubits` must not exceed `max_cluster_qubits` |
+| `observable_error_tolerance` | All | In (0, 1]; opts into bounded noisy-channel evaluation |
+| `allow_reset_marginalization`, `enable_sampling_reduction` | All | Booleans, default false; sampling reduction changes seeded random streams |
+| `trajectory_policy` | QCSim statevector, density matrix, path integral | `block_v1` or `shot_v1` (default) |
+| `trajectory_max_memory_mb` | QCSim statevector and density matrix | Positive MiB count |
+
+Combined routing and virtual-bond routing trade runtime against truncation at
+finite bond caps; neither is selected automatically. Options for another
+backend or method are `unsupported_capability`; out-of-range values are
+`invalid_input`. Both are returned during submission, before task allocation.
+Validation accepts GPU options without a GPU, so validate first and then run a
+small request on each deployed GPU backend. Estimates report reduction results
+(`auto_reduced`, `qubits_before`, `qubits_after`, `clusters_count`,
+`largest_cluster_qubits`, `cluster_methods`, `expectation_error_bounds`) next to
+the expectation values. Maestro's
+[native request reference](https://github.com/QoroQuantum/maestro/blob/main/docs/native-request-api.md)
+describes each option in detail.
+
+Behaviour changes visible through the server: Maestro 0.3.10 made
+`coherent_depolarizing` isotropic (a rotation about a body diagonal whose Pauli
+twirl is exactly depolarizing; it was a Z rotation), so results for that noise
+kind differ from earlier libraries. QASM circuits accept qelib1.inc's `rzz`,
+`rxx` and `u0` gates. Estimates remove terminal measurements before execution.
 
 The server deliberately uses Maestro's validation rules without translating old
 keys. Removed JSON options produce `invalid_input` during submission, before
@@ -194,6 +247,43 @@ no extra socket commands or persistent simulator handles are needed:
 | Read-only MPS operator expectation | `diagnostics: ["operator_expectation"]`, `expectation_operators` |
 | MPS/MPO routing and maintenance | `move_qubits`, `maintenance: ["trim", "recanonicalize"]` in a diagnostics request |
 | Full pure-state amplitudes/probabilities | `operation: "statevector"` or `"probabilities"`; omit `basis_states` for bulk output |
+| Observable mirror fidelity (truncation error per observable) | `operation: "mirror_fidelity"`, `observables` |
+| Adjoint values, Jacobians and vector–Jacobian products | `operation: "adjoint_expectation_values"`, `"adjoint_jacobian"` or `"adjoint_vjp"`; `observables`, optional `parameter_rows`, `cotangents` for VJP |
+| Two-qubit rotations in instruction arrays | `{"name": "rzz" or "rxx", "qubits": [a, b], "params": [theta]}` |
+| Per-gate and per-measurement noise controls | `"noiseless": true` on a gate; `"readout_error": p` or `{p_meas1_prep0, p_meas0_prep1}` on `measure` |
+| Pauli channel instructions | `{"name": "pauli_channel", "qubits": [...], "probabilities": [...]}` |
+
+The adjoint operations, observable mirror fidelity, and the instruction fields need
+a Maestro library that lists them in `native.operations`, `native.adjoint` and
+`native.instructions`. Older libraries reject them during submission with
+`unsupported_capability` or `invalid_input`, before task allocation. The server
+needs no configuration for them: it forwards the request and returns the native
+result unchanged.
+
+Adjoint operations differentiate a unitary circuit on the QCSim CPU statevector
+(`qcsim` or `composite_qcsim`). Each `observables` entry is a Pauli string, a
+weighted sum `{"terms": [[coefficient, pauli], ...]}` or basis-state probabilities
+`{"probabilities": [qubits]}`. Results report `num_parameters`, `num_values`,
+the circuit's own angles as `circuit_parameters`, and `expectation_values[row]`,
+`jacobian[row][value][parameter]` or `vjp[row][parameter]`. Output is bounded by
+`max_output_elements`; a state exceeding physical or cgroup memory fails with
+`insufficient_resources`. For example, this returns `d<Z>/dθ = -sin θ` for two
+parameter rows:
+
+```json
+{"version":2,"command":"submit","session_id":0,"request":{"schema_version":2,
+ "operation":"adjoint_jacobian",
+ "circuit":{"num_qubits":1,"source":"OPENQASM 2.0; qreg q[1]; rx(0.3) q[0];"},
+ "observables":["Z",{"probabilities":[0]}],"parameter_rows":[[0.3],[1.1]]}}
+```
+
+A `pauli_channel` is applied exactly on density-matrix and MPO methods. Pure-state
+and MPS methods sample one Pauli per noise realization and require a `noise`
+block with trajectory evaluation, whose `channels` may be omitted; set
+`noise.realizations` to the shot count for independent draws. `readout_error`
+applies only to `execute` and `checkpoint_batch` counts and composes with a
+noise model's readout. `rxx`/`rzz` instructions expand exactly like the QASM
+gates.
 
 Batched expectations preserve observable order and duplicates. `estimate` returns
 `expectation_values`; `incremental_evolve` returns `steps` and an
@@ -367,7 +457,11 @@ failure frame. Such a failure cannot override cancellation, malformed framing or
 unconfirmed cleanup. Ordinary trailing diagnostic output need not end in a
 newline; result and Slurm step frames must be complete newline-terminated lines.
 
-The private worker protocol sends a readiness frame only after cancellation
+The private worker protocol (version 2) frames JSON control messages and sends a
+result as a raw frame after its JSON header. Escaping a result inside JSON would
+inflate quote-heavy results, such as counts, past the limit Maestro allows; a
+worker whose result exceeds the server bound reports `invalid_input` instead.
+It sends a readiness frame only after cancellation
 handlers are installed. The parent sends no task before that frame; cancellation
 before readiness therefore cannot leave MPI ranks. After readiness the parent
 waits for supervisor cleanup confirmation. A private exit code distinguishes
@@ -381,10 +475,12 @@ framing/log limits, diagnostics lifetime, leases, atomic validation, profile
 validation, native error propagation, and cancellation while launcher stdin is
 blocked. Deterministic cancellation tests cover startup, partial upload, in-flight
 launchers, completed launchers, post-cleanup response loss and failed Slurm cleanup.
-Boundary tests exercise oversized versioned and legacy frames. Mock launchers do
-not require MPI hardware. QRMI's opt-in native
-integration suite starts a private instance of this daemon and exercises the full
-client/adapter path. Maestro CTest additionally covers two-rank native MPI
+Boundary tests exercise oversized versioned and legacy frames, and a quote-heavy
+result at exactly the result bound. Mock launchers do
+not require MPI hardware. QRMI's native integration suite starts a private
+instance of this daemon and exercises the full client/adapter path. CI runs it on
+CPU from the QRMI commit pinned as `QRMI_REF`, requiring rather than skipping the
+native binaries; QRMI and Maestro are public, so no credentials are stored. Maestro CTest additionally covers two-rank native MPI
 success/failure and optional local and MPI GPU distribution. The server CI build
 enables Maestro's native request contract suite, `expectation_batches`,
 `tensor_dispatch_current`, `tensor_dispatch_legacy`, `fusion_interface_wrappers`,
@@ -392,8 +488,27 @@ and `network_jobs`. The mock-plugin suites require no GPU.
 
 `cargo test --test native_api` starts private production daemons and exercises the
 new tensor queries, wide MPO registers, fusion metadata, current option names,
-validation bounds, and result/seed retrieval over the public socket. Each daemon
-owns a separate temporary socket. No system service needs replacing to run tests.
+validation bounds, and result/seed retrieval over the public socket. It also
+checks the routing, reduction, trajectory and GPU Pauli option metadata and
+backend-specific bounds (validation only, no GPU), adjoint values/Jacobians/VJPs,
+observable mirror fidelity (including density-matrix and MPO methods), `rxx`/`rzz`,
+`noiseless`, `readout_error` and `pauli_channel` instructions, refusal of
+`readout_error` where terminal measurements are removed (adjoint operations and
+nested overlap/evolution circuits), and the `native_build` diagnostics field. These
+need a Maestro library that has the features; CI builds the Maestro commit
+pinned as `MAESTRO_REF` in `.github/workflows/build-and-test.yml`. Update that
+pin together with server changes that depend on newer native features.
+Each daemon owns a separate temporary socket. No system service needs replacing
+to run tests.
+
+To test against an uninstalled Maestro checkout without touching the default
+build, use a separate target directory and put that build first on the loader
+path, since `LD_LIBRARY_PATH` takes precedence over the embedded runtime path:
+
+```bash
+MAESTRO_DIR=$HOME/maestro CARGO_TARGET_DIR=/tmp/maestro-server-target \
+LD_LIBRARY_PATH=$HOME/maestro/build:$LD_LIBRARY_PATH cargo test
+```
 
 On a configured GPU host, a Maestro build with `MAESTRO_BUILD_REQUEST_TESTS=ON`
 also provides these optional hardware checks:

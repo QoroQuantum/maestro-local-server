@@ -137,7 +137,7 @@ fn serve_test_worker() -> io::Result<()> {
         }
         _ => task.execute(),
     };
-    protocol::write_result(&mut socket, &task, &result)?;
+    protocol::write_result(&mut socket, &task, &result, None)?;
     if mode == "wrong_task_cleanup_failure" {
         std::process::exit(75);
     }
@@ -341,6 +341,60 @@ fn truncated_protocol_frame_is_rejected() {
     let data = [0, 0, 0, 0, 0, 0, 0, 20, b'{'];
     let error = protocol::read_message(&mut data.as_slice()).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn results_travel_unescaped_up_to_the_result_limit() {
+    // A quote-heavy native result at the limit. Escaping it as a JSON string, as
+    // protocol version 1 did, would have nearly doubled its frame.
+    let limit = crate::maestro::api::MAX_RESULT_BYTES;
+    let mut result = String::with_capacity(limit + 1);
+    result.push_str(r#"{"k":""#);
+    while result.len() < limit - 2 {
+        result.push_str(r#"\""#);
+    }
+    result.push_str(r#""}"#);
+    assert_eq!(result.len(), limit);
+    let task = task("unused");
+    let mut data = Vec::new();
+    protocol::write_result(&mut data, &task, &result, None).unwrap();
+    assert!(data.len() < limit + 1024);
+    let decoded = protocol::read_result(&mut data.as_slice(), &task).unwrap();
+    assert!(decoded.result == result);
+
+    // One byte more is refused before anything is written.
+    result.insert(limit - 2, ' ');
+    let mut oversized = Vec::new();
+    assert!(protocol::write_result(&mut oversized, &task, &result, None).is_err());
+    assert!(oversized.is_empty());
+    // A result frame advertising more is rejected without reading it.
+    let mut small = Vec::new();
+    protocol::write_result(&mut small, &task, "{}", None).unwrap();
+    small.truncate(small.len() - 10);
+    small.extend_from_slice(&(limit as u64 + 1).to_be_bytes());
+    let Err(error) = protocol::read_result(&mut small.as_slice(), &task) else {
+        panic!("An oversized result frame was accepted");
+    };
+    assert!(error.to_string().contains("exceeds size limit"), "{error}");
+}
+
+#[test]
+fn oversized_results_reach_the_parent_as_structured_failures() {
+    let task = task("unused");
+    let result = "x".repeat(crate::maestro::api::MAX_RESULT_BYTES + 1);
+    let mut data = Vec::new();
+    assert!(send_result(&mut data, &task, &result, None).is_err());
+    let decoded = protocol::read_result(&mut data.as_slice(), &task).unwrap();
+    let error = diagnostics::native_error(&decoded.result).unwrap();
+    let value = json::parse(&error.to_string()).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_input");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds the server result limit"),
+        "{value}"
+    );
 }
 
 #[test]

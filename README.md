@@ -97,7 +97,9 @@ Rebuild Maestro and the server together so their native API versions match.
 See [Native Maestro API v2](docs/native-api-v2.md) for the request protocol,
 MPI profiles, and runtime configuration.
 The native API also exposes current MPS/MPO diagnostics, batched expectations,
-wide MPO bitstrings, and gate-fusion controls. See the
+wide MPO bitstrings, gate-fusion controls, routing/reduction/GPU Pauli options,
+adjoint differentiation, observable mirror fidelity, and instruction-level noise
+controls; task logs report the Maestro build that ran each task. See the
 [option migration table](docs/native-api-v2.md#current-native-options-and-client-migration)
 before upgrading clients: native schema version 2 includes renamed options.
 Follow the [native/GPU upgrade guidance](docs/native-api-v2.md#upgrading-native-and-gpu-libraries)
