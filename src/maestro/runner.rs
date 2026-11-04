@@ -110,6 +110,12 @@ struct ActiveTask {
     execution: Arc<maestro::worker::Execution>,
 }
 
+/// A removal started by `Runner::begin_removal`, holding the worker (if the
+/// task was running) that `Runner::finish_removal` waits for.
+#[must_use]
+#[derive(Debug)]
+pub struct Removal(Option<ActiveTask>);
+
 #[derive(Debug)]
 pub struct Runner {
     tasks_queue: Mutex<VecDeque<Task>>,
@@ -372,6 +378,15 @@ impl Runner {
     }
 
     pub fn remove_task(&self, session_id: u32, task_id: u32) -> std::io::Result<()> {
+        let removal = self.begin_removal(session_id, task_id);
+        self.finish_removal(removal)
+    }
+
+    /// Dequeues the task, discards its result and asks an active worker to
+    /// stop. Nothing here waits, so callers may hold their own locks; release
+    /// them before `finish_removal`, which waits for the worker to exit (up to
+    /// the MPI cleanup budget).
+    pub fn begin_removal(&self, session_id: u32, task_id: u32) -> Removal {
         let execution = {
             let mut queue = self.tasks_queue.lock().unwrap();
             let queued = queue
@@ -395,8 +410,13 @@ impl Runner {
             }
             execution
         };
-        // Process termination and reaping never hold the queue or result locks.
-        self.cancel_execution(execution)
+        Removal(execution)
+    }
+
+    /// Waits until a worker stopped by `begin_removal` has exited and been
+    /// reaped. Process termination and reaping never hold the queue or result locks.
+    pub fn finish_removal(&self, removal: Removal) -> std::io::Result<()> {
+        self.cancel_execution(removal.0)
     }
 
     fn cancel_execution(&self, execution: Option<ActiveTask>) -> std::io::Result<()> {
@@ -588,6 +608,63 @@ mod tests_runner {
                 "OK NO\n"
             );
         }
+    }
+
+    #[test]
+    fn waiting_for_cancellation_cleanup_does_not_block_the_session() {
+        use std::time::{Duration, Instant};
+        let runner = Runner::new();
+        let session = Session::new(1);
+        let task_id = session.submit_request(String::new(), &runner).unwrap();
+        let task = runner.tasks_queue.lock().unwrap().pop_front().unwrap();
+        // A running MPI task whose supervisor takes a second to clean up.
+        let execution = Arc::new(maestro::worker::tests::slow_mpi_execution(
+            Duration::from_secs(1),
+        ));
+        *runner.active_task.lock().unwrap() = Some(ActiveTask {
+            session_id: task.session_id,
+            task_id,
+            execution: Arc::clone(&execution),
+        });
+        let id = task_id.to_string();
+        thread::scope(|scope| {
+            let cancel =
+                scope.spawn(|| session.handle_request(vec![&id, "CANCEL"], Arc::clone(&runner)));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !execution.is_cancelled() {
+                assert!(Instant::now() < deadline, "Cancellation did not start");
+                thread::sleep(Duration::from_millis(1));
+            }
+            // The task stays listed and running until its cleanup is confirmed,
+            // and other commands are answered meanwhile.
+            let start = Instant::now();
+            assert_eq!(
+                session.handle_request(vec![&id, "EXISTS"], Arc::clone(&runner)),
+                "OK YES\n"
+            );
+            assert_eq!(
+                session.handle_request(vec![&id, "RUNNING"], Arc::clone(&runner)),
+                "OK YES\n"
+            );
+            assert!(
+                start.elapsed() < Duration::from_millis(500),
+                "Session commands waited {:?} for worker cleanup",
+                start.elapsed()
+            );
+            assert_eq!(cancel.join().unwrap(), "OK YES\n");
+        });
+        assert_eq!(
+            session.handle_request(vec![&id, "EXISTS"], Arc::clone(&runner)),
+            "OK NO\n"
+        );
+        assert!(!runner.is_running(1, task_id));
+        assert_eq!(
+            runner.diagnostics(1, task_id)["events"]
+                .members()
+                .last()
+                .map(|event| event["state"].to_string()),
+            Some("cancelled".to_string())
+        );
     }
 
     #[test]

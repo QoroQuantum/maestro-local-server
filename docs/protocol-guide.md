@@ -96,7 +96,7 @@ These commands work for tasks created via either `API {"version":2,"command":"su
 | `SESSION <id> TASK <task_id> FINISHED` | `OK YES` or `OK NO` | `YES` once execution has finished (either succeeded or failed) and a result is ready. |
 | `SESSION <id> TASK <task_id> FAILED` | `OK YES` or `OK NO` | `YES` if the finished task failed (e.g., worker error or native execution failure). |
 | `SESSION <id> TASK <task_id> GET_RESULTS` | `OK <json>` or `ERROR ...` | Returns the task's JSON result and removes the task from the session's active/result list. |
-| `SESSION <id> TASK <task_id> CANCEL` | `OK YES`, `OK NO`, or `ERROR ...` | Cancels an unsubmitted, queued, or running task. If running, terminates and reaps the worker process group before returning `OK YES`. |
+| `SESSION <id> TASK <task_id> CANCEL` | `OK YES`, `OK NO`, or `ERROR ...` | Cancels an unsubmitted, queued, or running task. If running, terminates and reaps the worker process group before returning `OK YES`; MPI cleanup can take 25 seconds, while other commands for the session are still answered. |
 
 ### Legacy Task Builder Commands
 

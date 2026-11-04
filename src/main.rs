@@ -17,20 +17,24 @@ use std::os::unix::net::{UnixListener, UnixStream};
 mod maestro_server {
     use super::*;
 
+    fn socket_path(use_tmp_file: bool) -> String {
+        std::env::var("MAESTRO_SOCKET").unwrap_or_else(|_| {
+            if use_tmp_file {
+                "/tmp/maestro.sock"
+            } else {
+                "/run/maestro.sock"
+            }
+            .into()
+        })
+    }
+
     fn server(
         session_manager: Arc<maestro::sessions::SessionManager>,
         runner: Arc<maestro::runner::Runner>,
         running: Arc<AtomicBool>,
-        use_tmp_file: bool,
+        socket_path: &str,
     ) -> std::io::Result<()> {
         println!("Creating Maestro Socket...");
-        let configured_socket = std::env::var("MAESTRO_SOCKET").ok();
-        let socket_path = configured_socket.as_deref().unwrap_or(if use_tmp_file {
-            "/tmp/maestro.sock"
-        } else {
-            "/run/maestro.sock"
-        });
-
         if std::fs::metadata(socket_path).is_ok() {
             println!("A socket is already present. Deleting...");
             std::fs::remove_file(socket_path)?;
@@ -38,7 +42,12 @@ mod maestro_server {
 
         println!("Now really onto listening...");
 
-        let listener = UnixListener::bind(socket_path)?;
+        let listener = UnixListener::bind(socket_path).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("Cannot listen on {socket_path}: {error}"),
+            )
+        })?;
 
         println!("Granting read/write permissions to the socket file...");
 
@@ -50,6 +59,7 @@ mod maestro_server {
         listener.set_nonblocking(true)?; // So accept() won't block forever
         println!("Server is listening...");
 
+        let mut failure = None;
         while running.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _addr)) => {
@@ -60,7 +70,11 @@ mod maestro_server {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => {
-                    eprintln!("Accept error: {}", e);
+                    // A listener that stops accepting must stop the daemon too.
+                    failure = Some(std::io::Error::new(
+                        e.kind(),
+                        format!("Cannot accept connections on {socket_path}: {e}"),
+                    ));
                     break;
                 }
             }
@@ -70,9 +84,8 @@ mod maestro_server {
 
         // Explicitly drop the listener to close the socket
         drop(listener);
-        std::fs::remove_file(socket_path)?;
-
-        Ok(())
+        let removed = std::fs::remove_file(socket_path);
+        failure.map_or(removed, Err)
     }
 
     // Valid received commands:
@@ -159,6 +172,20 @@ mod maestro_server {
         std::thread::JoinHandle<i32>,
         Arc<AtomicBool>,
     ) {
+        start_at(wait, socket_path(use_tmp_file))
+    }
+
+    /// With `wait`, returns once a termination signal arrives or the listener
+    /// stops, for example because the socket could not be created.
+    pub fn start_at(
+        wait: bool,
+        socket_path: String,
+    ) -> (
+        thread::JoinHandle<std::io::Result<()>>,
+        Arc<maestro::runner::Runner>,
+        std::thread::JoinHandle<i32>,
+        Arc<AtomicBool>,
+    ) {
         println!("Starting Maestro Local Server...");
 
         let running = Arc::new(AtomicBool::new(true));
@@ -196,34 +223,38 @@ mod maestro_server {
                 session_manager_clone,
                 runner_clone,
                 r_running_clone,
-                use_tmp_file,
+                &socket_path,
             )
         });
 
         // Main thread block until workers finish
         // The loop keeps the main thread alive. When the signal thread flips the flag,
-        // the while loop terminates, and we move to the join phase.
+        // or the listener stops serving, the loop ends and we move to the join phase.
         if wait {
             println!("Main thread waiting for termination signal...");
 
-            while running.load(Ordering::SeqCst) {
+            while running.load(Ordering::SeqCst) && !session_thread.is_finished() {
                 thread::sleep(Duration::from_millis(200));
                 session_manager.tick_sessions(Arc::clone(&runner));
             }
+            running.store(false, Ordering::SeqCst);
         }
 
         (session_thread, runner, runner_thread, Arc::clone(&running))
     }
 
+    /// Stops the runner and returns the listener's failure, if any, so a
+    /// daemon that could not serve exits unsuccessfully.
     pub fn stop(
         session_thread: thread::JoinHandle<std::io::Result<()>>,
         runner: Arc<maestro::runner::Runner>,
         runner_thread: std::thread::JoinHandle<i32>,
-    ) {
+    ) -> std::io::Result<()> {
         println!("Shutdown initiated. Waiting for worker threads to join...");
 
-        // more cleanup here
-        let _ = session_thread.join();
+        let listener = session_thread
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("Maestro listener panicked")));
 
         // Stop the runner thread
         if let Err(error) = runner.stop() {
@@ -231,7 +262,11 @@ mod maestro_server {
         }
         let _ = runner_thread.join();
 
-        println!("Maestro Local Server shut down gracefully.");
+        match &listener {
+            Ok(()) => println!("Maestro Local Server shut down gracefully."),
+            Err(error) => eprintln!("Maestro Local Server stopped: {error}"),
+        }
+        listener
     }
 
     #[cfg(test)]
@@ -296,7 +331,10 @@ fn main() {
 
     let (session_thread, runner, runner_thread, _) = maestro_server::start(true, false);
 
-    maestro_server::stop(session_thread, runner, runner_thread);
+    // A nonzero exit lets the service manager's restart policy recover.
+    if maestro_server::stop(session_thread, runner, runner_thread).is_err() {
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -327,12 +365,41 @@ mod server_tests {
         fn drop(&mut self) {
             // A failed assertion or deadline must also stop this test's server.
             self.stop_flag.store(false, Ordering::SeqCst);
-            maestro_server::stop(
+            if let Err(error) = maestro_server::stop(
                 self.listener.take().unwrap(),
                 Arc::clone(&self.runner),
                 self.runner_thread.take().unwrap(),
-            );
+            ) {
+                eprintln!("Test server listener failed: {error}");
+            }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn listener_failure_stops_the_daemon_and_is_reported() {
+        let path = std::env::temp_dir()
+            .join(format!("maestro-missing-{}", std::process::id()))
+            .join("maestro.sock");
+        let (done, finished) = std::sync::mpsc::channel();
+        let socket = path.to_string_lossy().into_owned();
+        thread::spawn(move || {
+            let (listener, runner, runner_thread, running) = maestro_server::start_at(true, socket);
+            let stopped = !running.load(Ordering::SeqCst);
+            let _ = done.send((
+                stopped,
+                maestro_server::stop(listener, runner, runner_thread),
+            ));
+        });
+        // Previously the main loop kept waiting for a signal after the listener failed.
+        let (stopped, result) = finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("The daemon kept running after its listener failed");
+        assert!(stopped, "The daemon still reported itself as running");
+        let error = result.expect_err("A failed listener was reported as a clean shutdown");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("Cannot listen on"), "{error}");
+        assert!(!path.exists());
     }
 
     fn send_command_noclose(mut stream: &mut UnixStream, command: &str) -> std::io::Result<String> {

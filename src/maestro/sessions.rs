@@ -251,24 +251,31 @@ impl Session {
     }
 
     pub fn cancel_task(&self, runner: Arc<runner::Runner>, task_id: u32) -> std::io::Result<bool> {
-        let mut sent_to_runner = self.sent_to_runner.lock().unwrap();
-        if sent_to_runner.contains(&task_id) || runner.is_running(self.get_id(), task_id) {
-            runner.remove_task(self.get_id(), task_id)?;
-            sent_to_runner.remove(&task_id);
-            Ok(true)
-        } else {
-            // An unsubmitted task has no worker output, but still records cancellation.
-            let removed = self
-                .initiated_tasks
-                .lock()
-                .unwrap()
-                .remove(&task_id)
-                .is_some();
-            if removed {
-                runner.record_unsubmitted_cancellation(self.get_id(), task_id);
+        let removal = {
+            // Serializes with submission and result retrieval: once the task is
+            // dequeued and its result discarded here, neither can claim it.
+            let sent_to_runner = self.sent_to_runner.lock().unwrap();
+            if !sent_to_runner.contains(&task_id) && !runner.is_running(self.get_id(), task_id) {
+                // An unsubmitted task has no worker output, but still records cancellation.
+                let removed = self
+                    .initiated_tasks
+                    .lock()
+                    .unwrap()
+                    .remove(&task_id)
+                    .is_some();
+                if removed {
+                    runner.record_unsubmitted_cancellation(self.get_id(), task_id);
+                }
+                return Ok(removed);
             }
-            Ok(removed)
-        }
+            runner.begin_removal(self.get_id(), task_id)
+        };
+        // Waiting for the worker can take the whole MPI cleanup budget. Other
+        // commands on this session must still be answered meanwhile; the task
+        // stays listed, and running, until its cleanup is confirmed.
+        runner.finish_removal(removal)?;
+        self.sent_to_runner.lock().unwrap().remove(&task_id);
+        Ok(true)
     }
 
     // SESSION <session_id> TASK ... commands

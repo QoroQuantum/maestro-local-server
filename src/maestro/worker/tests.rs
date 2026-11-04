@@ -20,6 +20,38 @@ pub(crate) fn task(qasm: &str) -> Task {
     )
 }
 
+/// A running MPI execution whose supervisor confirms cleanup `delay` after
+/// SIGTERM, for callers that must not block while cancellation waits.
+pub(crate) fn slow_mpi_execution(delay: Duration) -> Execution {
+    let script = format!(
+        "trap 'sleep {}; exit 0' TERM; echo ready; while :; do sleep 0.01; done",
+        delay.as_secs_f64()
+    );
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", &script])
+        .stdout(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // Signal only after the trap is installed.
+    let mut ready = String::new();
+    io::BufRead::read_line(
+        &mut io::BufReader::new(child.stdout.take().unwrap()),
+        &mut ready,
+    )
+    .unwrap();
+    assert_eq!(ready, "ready\n");
+    let execution = Execution::new();
+    *execution.process.lock().unwrap() = Process {
+        child: Some(child),
+        socket: None,
+        mpi: true,
+        ready: true,
+        cleanup_error: None,
+    };
+    execution
+}
+
 pub(crate) fn wait_for_worker(execution: &Execution) -> u32 {
     let deadline = Instant::now() + TIMEOUT;
     loop {

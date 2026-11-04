@@ -220,7 +220,7 @@ sudo dpkg -P maestro-local-server
 
 ### Socket Location and Permissions
 
-By default, the production daemon creates its Unix domain socket at `/run/maestro.sock` and sets permissions to `0660` (`rw-rw----`).
+By default, the production daemon creates its Unix domain socket at `/run/maestro.sock` and sets permissions to `0660` (`rw-rw----`). If it cannot create the socket, or later stops accepting connections, it reports the cause, stops its runner and exits with status 1, so the service's `Restart=always` policy restarts it.
 
 The packaged systemd service ([`debian/maestro.service`](../debian/maestro.service)) runs with `Group=users`:
 
@@ -369,6 +369,10 @@ The runtime dynamic linker cannot find `libmaestro.so`. Either:
 ### `Unable to find libclang` during `cargo build`
 
 `bindgen` requires `libclang` at build time. Install `libclang-dev` (Ubuntu/Debian) or `clang-devel` (Fedora/RHEL). If `libclang` is installed in a non-standard path, set `LIBCLANG_PATH=/path/to/llvm/lib`.
+
+### `Cannot listen on <path>` and the service restarting
+
+The daemon could not create its socket, for example because the directory in `MAESTRO_SOCKET` does not exist or is not writable by the service user. It exits with status 1 rather than running without a socket; check `journalctl -u maestro.service` for the cause.
 
 ### `Permission denied` when connecting to `/run/maestro.sock`
 

@@ -845,10 +845,17 @@ fn dropped_readout_is_refused_and_mixed_state_mirror_observables_run() {
     overlap["other_circuit"] = annotated.clone();
     refused.push(overlap);
     let mut evolve = request("incremental_evolve", "statevector", "ry(0.4) q[0];");
-    evolve["step_circuit"] = annotated;
+    evolve["step_circuit"] = annotated.clone();
     evolve["steps"] = json::array![1];
     evolve["observables"] = json::array!["ZI"];
     refused.push(evolve);
+    // A checkpoint prefix's terminal measurements are removed too; only its
+    // suffixes are sampled.
+    let mut checkpoint = request("checkpoint_batch", "statevector", "");
+    checkpoint["circuit"] = annotated.clone();
+    checkpoint["suffixes"] = json::array![{num_qubits: 2, source: "OPENQASM 2.0; qreg q[2]; creg c[2]; measure q[0] -> c[0];"}];
+    checkpoint["execution"]["shots"] = 8.into();
+    refused.push(checkpoint);
     for document in refused {
         let response = server.submit(session, document.clone());
         assert_eq!(
@@ -884,4 +891,54 @@ fn dropped_readout_is_refused_and_mixed_state_mirror_observables_run() {
             "{method}: {response}"
         );
     }
+}
+
+#[test]
+fn mixed_state_overlap_and_statevector_fidelity_reach_the_worker() {
+    let server = Server::start();
+    let caps = server.api(object! {version: 2, command: "capabilities"});
+    let queries = &caps["native"]["mixed_state_queries"];
+    assert_eq!(
+        queries["operations"],
+        json::array!["density_matrix_overlap", "fidelity_with_statevector"],
+        "{caps}"
+    );
+    assert_eq!(queries["max_target_statevector_qubits"], 20);
+
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let bell = json::array![[h, 0], [0, 0], [0, 0], [h, 0]];
+    for method in ["density_matrix", "matrix_product_operator"] {
+        let mut fidelity = request("fidelity_with_statevector", method, "h q[0]; cx q[0],q[1];");
+        fidelity["target_statevector"] = bell.clone();
+        near(&server.run(fidelity.clone())["fidelity"], 1.0);
+        // Exact amplitude damping on qubit 0 after both gates lowers it.
+        fidelity["noise"] =
+            object! {evaluation: "exact", channels: [{kind: "t1", targets: [0], gamma: 0.36}]};
+        let noisy = server.run(fidelity)["fidelity"].as_f64().unwrap();
+        assert!((noisy - 0.7624).abs() < 1e-9, "{method}: {noisy}");
+
+        let mut overlap = request("density_matrix_overlap", method, "h q[0];");
+        overlap["other_circuit"] =
+            object! {num_qubits: 2, source: "OPENQASM 2.0; qreg q[2]; x q[0];"};
+        complex(&server.run(overlap)["overlap"], 0.5, 0.0);
+    }
+
+    // Pure states have inner_product and the statevector queries instead, and
+    // the target must be a normalized pure state.
+    let session = server.session();
+    let mut pure = request("fidelity_with_statevector", "statevector", "h q[0];");
+    pure["target_statevector"] = bell;
+    let response = server.submit(session, pure.clone());
+    assert_eq!(
+        response["error"]["code"], "unsupported_capability",
+        "{response}"
+    );
+    pure["simulator"]["method"] = "density_matrix".into();
+    pure["target_statevector"] = json::array![[1, 0], [1, 0], [0, 0], [0, 0]];
+    let response = server.submit(session, pure);
+    assert_eq!(response["error"]["code"], "invalid_input", "{response}");
+    assert_eq!(
+        server.command(&format!("SESSION {session} TASK 0 EXISTS")),
+        "NO"
+    );
 }

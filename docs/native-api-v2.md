@@ -73,6 +73,12 @@ invalid bytes or partial characters at a truncation boundary become replacement
 characters; the text marker and decoding can make the returned string larger
 than 64 KiB. Readers continue draining full pipes even after reaching the limit.
 Successful cancellation waits for the child to exit and for capture to drain.
+`CANCEL` and session `DELETE` therefore reply only after cleanup, which for an
+MPI task may take the launcher's 20-second budget plus five seconds; clients
+should wait at least that long (QRMI allows 60 seconds). Meanwhile the server
+answers other commands for the same session: the task is still listed and
+`RUNNING` until its cleanup is confirmed, then it is removed and its
+diagnostics end with `cancelled`.
 
 Additional diagnostic fields are additive within API v2:
 
@@ -252,9 +258,12 @@ no extra socket commands or persistent simulator handles are needed:
 | Two-qubit rotations in instruction arrays | `{"name": "rzz" or "rxx", "qubits": [a, b], "params": [theta]}` |
 | Per-gate and per-measurement noise controls | `"noiseless": true` on a gate; `"readout_error": p` or `{p_meas1_prep0, p_meas0_prep1}` on `measure` |
 | Pauli channel instructions | `{"name": "pauli_channel", "qubits": [...], "probabilities": [...]}` |
+| Mixed-state overlap `Tr(rho sigma)` | `operation: "density_matrix_overlap"`, `other_circuit` (density matrix or MPO) |
+| Fidelity of a mixed state with a pure target | `operation: "fidelity_with_statevector"`, `target_statevector` (normalized `[real, imaginary]` amplitudes, at most 20 qubits) |
 
-The adjoint operations, observable mirror fidelity, and the instruction fields need
-a Maestro library that lists them in `native.operations`, `native.adjoint` and
+The adjoint operations, observable mirror fidelity, the mixed-state queries and
+the instruction fields need a Maestro library that lists them in
+`native.operations`, `native.adjoint`, `native.mixed_state_queries` and
 `native.instructions`. Older libraries reject them during submission with
 `unsupported_capability` or `invalid_input`, before task allocation. The server
 needs no configuration for them: it forwards the request and returns the native
@@ -493,8 +502,10 @@ checks the routing, reduction, trajectory and GPU Pauli option metadata and
 backend-specific bounds (validation only, no GPU), adjoint values/Jacobians/VJPs,
 observable mirror fidelity (including density-matrix and MPO methods), `rxx`/`rzz`,
 `noiseless`, `readout_error` and `pauli_channel` instructions, refusal of
-`readout_error` where terminal measurements are removed (adjoint operations and
-nested overlap/evolution circuits), and the `native_build` diagnostics field. These
+`readout_error` where terminal measurements are removed (adjoint operations,
+nested overlap/evolution circuits and checkpoint prefixes), mixed-state overlap
+and statevector fidelity on density-matrix and MPO methods, and the
+`native_build` diagnostics field. These
 need a Maestro library that has the features; CI builds the Maestro commit
 pinned as `MAESTRO_REF` in `.github/workflows/build-and-test.yml`. Update that
 pin together with server changes that depend on newer native features.
