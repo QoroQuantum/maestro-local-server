@@ -1,0 +1,127 @@
+name: Release
+
+# Publishes a GitHub release when a version tag is pushed (vX.Y.Z, matching the
+# version in Cargo.toml). Builds the .deb for x86_64 and aarch64 against the
+# Maestro release that scripts/install.sh pins, installs and runs each package
+# on a clean Debian 12 system, then creates the release with the packages and
+# their checksums attached. A tag with a hyphen (v0.2.0-rc1) makes a prerelease.
+#
+# To release: bump the version in Cargo.toml, merge to main, wait for CI, then
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build .deb (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag="${GITHUB_REF_NAME%%-*}"
+          if [ "v$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      # Ubuntu 22.04 keeps the package installable on Ubuntu 22.04+ and Debian 12+.
+      - name: Build in Ubuntu 22.04
+        run: |
+          docker run --rm --platform "${{ matrix.platform }}" \
+            -v "$GITHUB_WORKSPACE:/src" -w /src ubuntu:22.04 \
+            bash .github/scripts/build_release_deb.sh
+
+      - name: Install and run the package on a clean Debian 12
+        run: |
+          docker run --rm --platform "${{ matrix.platform }}" \
+            -v "$GITHUB_WORKSPACE:/src" -w /src debian:12 \
+            bash .github/scripts/check_release_deb.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: deb-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/MAESTRO_VERSION
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write checksums and release notes
+        working-directory: dist
+        run: |
+          version="${TAG#v}"
+          maestro=$(cat MAESTRO_VERSION)
+          sha256sum -- *.deb > "maestro-local-server-${version}-SHA256SUMS"
+          cat "maestro-local-server-${version}-SHA256SUMS"
+          cat > notes.md <<EOF
+          ## Installing
+
+          These packages are built against **Maestro ${maestro}**. The server loads Maestro from \`/opt/maestro\`, so install Maestro's prebuilt library there first ([installation guide, section 2](https://github.com/${GH_REPO}/blob/${TAG}/docs/installation.md#2-installing-maestro-prebuilt)):
+
+          \`\`\`bash
+          ARCH=\$(uname -m)   # x86_64 or aarch64
+          curl -fsSLO https://github.com/QoroQuantum/maestro/releases/download/v${maestro}/maestro-c-${maestro}-linux-\${ARCH}.tar.gz
+          curl -fsSLO https://github.com/QoroQuantum/maestro/releases/download/v${maestro}/maestro-c-${maestro}-SHA256SUMS
+          sha256sum --ignore-missing -c maestro-c-${maestro}-SHA256SUMS
+          sudo mkdir -p /opt/maestro
+          sudo tar -xzf maestro-c-${maestro}-linux-\${ARCH}.tar.gz -C /opt/maestro --strip-components=1
+          \`\`\`
+
+          Then install the package for your architecture (\`amd64\` or \`arm64\`) with apt, which also installs its dependencies:
+
+          \`\`\`bash
+          sudo apt install ./maestro-local-server_${version}-1_amd64.deb
+          \`\`\`
+
+          The package installs and starts \`maestro.service\`, listening on \`/run/maestro.sock\`. It needs Ubuntu 22.04 or newer, or Debian 12 or newer. Verify downloads with \`maestro-local-server-${version}-SHA256SUMS\`.
+
+          To build from source instead, see the [installation guide](https://github.com/${GH_REPO}/blob/${TAG}/docs/installation.md).
+          EOF
+          cat notes.md
+
+      - name: Create the GitHub release
+        working-directory: dist
+        run: |
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --title "$TAG" \
+            --notes-file notes.md --generate-notes "${prerelease[@]}" \
+            ./*.deb "maestro-local-server-${TAG#v}-SHA256SUMS"

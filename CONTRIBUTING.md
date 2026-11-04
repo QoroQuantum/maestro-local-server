@@ -58,6 +58,20 @@ When developing changes in this repository:
    cargo test
    ```
 
+### Releasing
+
+Releases are published by the [Release workflow](.github/workflows/release.yml) when a version tag is pushed:
+
+1. Set the new version in `Cargo.toml` (and `CITATION.cff`), and, if the release should use a newer Maestro, update `MAESTRO_VERSION` in `scripts/install.sh` and the pinned version in `docs/installation.md` and `README.md`. Merge to `main` and wait for CI to pass.
+2. Tag the merged commit and push the tag. The tag must match the `Cargo.toml` version:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. The workflow builds `.deb` packages for x86_64 and aarch64, installs and runs each on a clean Debian 12 system, and publishes the GitHub release with the packages, their checksums, and install notes. A tag with a hyphen (for example `v0.2.0-rc1`) is published as a prerelease.
+
+If the workflow fails, fix the problem, delete the tag (`git push origin :refs/tags/v0.1.0` and `git tag -d v0.1.0`), and tag again.
+
 ---
 
 ## About Code Snippets in Issues

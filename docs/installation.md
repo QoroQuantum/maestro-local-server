@@ -114,6 +114,8 @@ For example, `MAESTRO_DIR=/path/to/maestro cargo build --release` builds against
 
 For production Linux deployments, `maestro-local-server` can be packaged into a `.deb` archive that installs `/usr/bin/maestro-local-server` and manages the `maestro.service` systemd unit.
 
+> **Prebuilt packages:** each [GitHub release](https://github.com/QoroQuantum/maestro-local-server/releases) has `.deb` packages for x86_64 (`amd64`) and aarch64 (`arm64`), built against the pinned Maestro release, for Ubuntu 22.04+ and Debian 12+. Install Maestro to `/opt/maestro` as in section 2, then install the package with `sudo apt install ./maestro-local-server_<version>-1_<arch>.deb`; `apt` (unlike `dpkg -i`) also installs its dependencies. You can skip the build steps below.
+
 ### Step 1: Install `cargo-deb`
 
 ```bash
