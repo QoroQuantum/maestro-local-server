@@ -57,6 +57,11 @@ jobs:
       # Installed straight into /usr/local (a standard search path) rather
       # than a self-contained prefix, so no extra linker configuration is
       # needed for Boost's shared libraries at test-run time.
+      # The cache action extracts as the runner user, but these directories are
+      # root-owned, so a restore previously failed and Boost was always rebuilt.
+      - name: Allow restoring Boost into /usr/local
+        run: sudo chown "$(id -u):$(id -g)" /usr/local/include /usr/local/lib
+
       - name: Restore Boost
         id: cache-boost
         uses: actions/cache/restore@v4
