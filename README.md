@@ -43,7 +43,7 @@ The server accepts newline-terminated commands in two protocol families on the s
 
 ## Documentation
 
-- **[Installation and Deployment Guide](docs/installation.md)** — system packages, building Maestro and `maestro-local-server` from source, `.deb` packaging, systemd configuration, socket permissions, and troubleshooting.
+- **[Installation and Deployment Guide](docs/installation.md)** — installing the prebuilt Maestro library, building `maestro-local-server`, `.deb` packaging, systemd configuration, socket permissions, troubleshooting, and (in an appendix) building Maestro from source.
 - **[Client Protocol and Usage Guide](docs/protocol-guide.md)** — end-to-end walkthroughs, command reference tables, and a complete Python client example.
 - **[Native Maestro API v2 Reference](docs/native-api-v2.md)** — request protocol details, option migration table, MPS/MPO tensor diagnostics, gate fusion, GPU plugin upgrade guidance, and supervised MPI launch profiles.
 - **[Worker Process Design](docs/worker-process.md)** — module layout, private IPC protocol, cancellation ordering, and subprocess isolation design.
@@ -52,10 +52,10 @@ The server accepts newline-terminated commands in two protocol families on the s
 
 - Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
 - `libclang` (required by `bindgen` at build time), e.g. `sudo apt install libclang-dev`
-- The [Maestro](https://github.com/QoroQuantum/maestro) C++ library (`libmaestro.so` and `maestrolib/Interface.h`) built from source, which needs Boost 1.89 or newer (Ubuntu 24.04's packaged Boost 1.83 is too old)
+- The [Maestro](https://github.com/QoroQuantum/maestro) C library (`libmaestro.so` and `maestrolib/Interface.h`). This version is pinned to Maestro **0.3.12**, which has a prebuilt archive for Linux x86_64 and aarch64 on its [GitHub release](https://github.com/QoroQuantum/maestro/releases/tag/v0.3.12), so you do not need to build Maestro or install Boost. The newest native features need a newer Maestro built from source.
 - For building the `.deb` package: `cargo install cargo-deb`
 
-See the [Installation and Deployment Guide](docs/installation.md) for full step-by-step instructions.
+See the [Installation and Deployment Guide](docs/installation.md) for full step-by-step instructions. With the prerequisites installed, `scripts/install.sh` downloads the pinned Maestro release, verifies it, and builds the server (add `--deb` to also install the package and start the service).
 
 ## Local Development Setup
 

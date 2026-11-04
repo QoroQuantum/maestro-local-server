@@ -1,73 +1,34 @@
 # Installation and Deployment Guide
 
-This guide covers building, installing, configuring, and verifying `maestro-local-server` from source or as a Debian/Ubuntu systemd service.
+This guide covers building, installing, configuring, and verifying `maestro-local-server` on Linux, either from source or as a Debian/Ubuntu systemd service. It uses a prebuilt Maestro library from a release archive, so you do not compile Maestro or install Boost, OpenBLAS or OpenMP yourself. [Appendix A](#appendix-a-building-maestro-from-source) covers building Maestro from source instead.
+
+**Shortcut:** once the prerequisites in section 1 are installed, `scripts/install.sh` does sections 2 and 3 for you (download and verify the Maestro archive, extract it to `/opt/maestro`, build the server), and `scripts/install.sh --deb` also does section 4 (build and install the package, and start the service). It is safe to rerun and skips the download if the pinned Maestro version is already installed. The sections below explain each step.
 
 ---
 
 ## 1. System Requirements
 
-`maestro-local-server` runs on Linux systems (and POSIX environments for local development/testing) and requires:
-
+- **Linux, x86_64 or aarch64, with glibc 2.28 or newer.** The Maestro archive is built in the `manylinux_2_28` image (glibc 2.28 baseline) and is checked on Debian 13 in its release workflow; this guide's steps were also run on Ubuntu 24.04. The server also builds and runs on other POSIX systems for development, but this guide only covers Linux.
 - **Rust toolchain** (stable, supporting Rust 2024 edition, Rust 1.85+) — install via [rustup](https://rustup.rs)
 - **`libclang`** — required at build time by `bindgen` to generate Rust FFI bindings from Maestro's C header (`Interface.h`)
-- **[Maestro](https://github.com/QoroQuantum/maestro) C++ shared library (`libmaestro.so`) and headers (`Interface.h`, `InterfaceTypes.h`)** — built from a matching Maestro revision
-- **Boost 1.89 or newer** with the `program_options`, `json`, `container`, and `serialization` libraries — older releases (for example, Boost 1.83 on Ubuntu 24.04) fail to compile Maestro with `call of overloaded 'serialize(double&)' is ambiguous`
+- **A C compiler and linker, `curl` and `git`**
 
-### Installing System Packages
+The Maestro library, with the Boost, OpenBLAS and OpenMP libraries it loads, comes in the archive from section 2.
 
 **Ubuntu / Debian:**
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  ninja-build \
-  git \
-  curl \
-  libclang-dev \
-  libfftw3-dev \
-  libopenblas-dev
+sudo apt-get install -y build-essential curl git libclang-dev
 ```
-
-Then install Boost. Check the version your distribution provides with `apt-cache policy libboost-all-dev`.
-
-- **Ubuntu 26.04 or newer** (Boost 1.90): install the distribution package:
-
-  ```bash
-  sudo apt-get install -y libboost-all-dev
-  ```
-
-- **Ubuntu 24.04 / 25.10 and other distributions with Boost older than 1.89**: build Boost from source into `/usr/local` (this is what CI does). Do not also install `libboost-all-dev`.
-
-  ```bash
-  cd /tmp
-  curl -L https://archives.boost.io/release/1.90.0/source/boost_1_90_0.tar.gz -o boost_1_90_0.tar.gz
-  tar -xzf boost_1_90_0.tar.gz
-  cd boost_1_90_0
-  ./bootstrap.sh --prefix=/usr/local
-  sudo ./b2 -j"$(nproc)" --with-program_options --with-json --with-container --with-serialization install
-  sudo ldconfig
-  ```
 
 **Fedora / RHEL:**
 
 ```bash
-sudo dnf install -y \
-  gcc-c++ \
-  cmake \
-  ninja-build \
-  git \
-  curl \
-  clang-devel \
-  fftw-devel \
-  boost-devel \
-  openblas-devel
+sudo dnf install -y gcc-c++ curl git clang-devel
 ```
 
-Check that `rpm -q boost-devel` reports 1.89 or newer (Fedora 45 ships 1.90). If it is older, remove `boost-devel` from the command and build Boost from source as shown for Ubuntu above.
-
-### Installing the Rust Toolchain
+**Rust toolchain:**
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -76,89 +37,76 @@ source "$HOME/.cargo/env"
 
 ---
 
-## 2. Building and Installing the Maestro C++ Library
+## 2. Installing Maestro (Prebuilt)
 
-`maestro-local-server` links dynamically against `libmaestro.so` and generates bindings against `maestrolib/Interface.h`. Always build Maestro and `maestro-local-server` from compatible revisions.
-
-```bash
-git clone https://github.com/QoroQuantum/maestro.git "$HOME/maestro"
-cd "$HOME/maestro"
-
-cmake -S . -B build -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr/local \
-  -DBUILD_PYTHON_BINDINGS=OFF \
-  -DCOMPILE_TESTS=OFF
-
-cmake --build build -j2
-```
-
-`-DCOMPILE_TESTS=OFF` skips Maestro's own test binaries, which `maestro-local-server` does not need. This roughly halves the build time and memory use.
-
-> **ARM (`aarch64`) hosts:** Qiskit Aer, which is enabled by default, uses x86-only intrinsics and fails to build on ARM with `immintrin.h: No such file or directory`. Add `-DENABLE_QISKIT_AER=OFF` to the `cmake -S . -B build ...` command. The other backends are unaffected.
-
-To install `libmaestro.so` system-wide and register it with the dynamic linker:
+This version of `maestro-local-server` is pinned to **Maestro 0.3.12**. Download the archive for your architecture, check it against the published checksums, and extract it to `/opt/maestro`:
 
 ```bash
-sudo cmake --install build
-echo "/usr/local" | sudo tee /etc/ld.so.conf.d/maestro.conf
-echo "/usr/local/lib" | sudo tee -a /etc/ld.so.conf.d/maestro.conf
-sudo ldconfig
+MAESTRO_VERSION=0.3.12
+ARCH=$(uname -m)   # x86_64 or aarch64
+BASE_URL="https://github.com/QoroQuantum/maestro/releases/download/v${MAESTRO_VERSION}"
+
+cd /tmp
+curl -fsSLO "${BASE_URL}/maestro-c-${MAESTRO_VERSION}-linux-${ARCH}.tar.gz"
+curl -fsSLO "${BASE_URL}/maestro-c-${MAESTRO_VERSION}-SHA256SUMS"
+sha256sum --ignore-missing -c "maestro-c-${MAESTRO_VERSION}-SHA256SUMS"
+
+sudo mkdir -p /opt/maestro
+sudo tar -xzf "maestro-c-${MAESTRO_VERSION}-linux-${ARCH}.tar.gz" -C /opt/maestro --strip-components=1
+cat /opt/maestro/BUILD_INFO
 ```
 
-> **Memory Tip:** Each Maestro compile job can use several gigabytes of RAM, more with Qiskit Aer enabled. With 8 GB of RAM, `-j3` runs out of memory, so the command above uses `-j2`. On machines with 32 GB or more, you can raise it (for example, `-j"$(nproc)"`). If the compiler is killed, rerun with `-j1`; the build continues where it stopped.
+The archive contains:
+
+| Path | Contents |
+| --- | --- |
+| `include/maestrolib/` | `Interface.h` and `InterfaceTypes.h`, the C headers the server's bindings are generated from |
+| `lib/` | `libmaestro.so` and the libraries it loads (Boost and OpenMP, plus OpenBLAS on x86_64). Each has `RUNPATH=$ORIGIN`, so the directory works wherever it is placed |
+| `bin/maestro-request` | Maestro's command-line request runner |
+| `BUILD_INFO` | Version, source commit, architecture, whether Qiskit Aer is included, and the bundled libraries |
+
+Things to know:
+
+- The **x86_64** archive includes Qiskit Aer. The **aarch64** archive does not, because Aer uses x86-only intrinsics; the other backends are unaffected.
+- Maestro 0.3.12 predates the Maestro changes behind the server's newest native features: adjoint differentiation, observable mirror fidelity, mixed-state overlap and fidelity queries, instruction-level noise, and the readout and result-size checks. Requests that use them are rejected at submission with `unsupported_capability`; everything else works. To use them, build Maestro from the commit CI tests against (see [Appendix A](#appendix-a-building-maestro-from-source)).
+- There is no archive for other architectures or operating systems. Use Appendix A there.
 
 ---
 
 ## 3. Building `maestro-local-server` from Source
 
-Clone this repository:
+Clone this repository and build it against the archive:
 
 ```bash
+cd "$HOME"
 git clone https://github.com/QoroQuantum/maestro-local-server.git
 cd maestro-local-server
-```
 
-### Option A: Using Default Paths (`~/maestro` + System Linker)
-
-If Maestro is checked out at `~/maestro` and `libmaestro.so` is installed in the system linker path:
-
-```bash
+export MAESTRO_HEADER=/opt/maestro/include/maestrolib/Interface.h
+export MAESTRO_LIBRARY_DIR=/opt/maestro/lib
 cargo build --release
 ```
 
-### Option B: Pointing to a Specific Maestro Checkout (`MAESTRO_DIR`)
-
-If your Maestro checkout and CMake build directory (`build/libmaestro.so`) are in another location, set `MAESTRO_DIR`:
-
-```bash
-MAESTRO_DIR=/path/to/maestro cargo build --release
-```
-
-When `MAESTRO_DIR` or `MAESTRO_LIBRARY_DIR` is set at build time, `build.rs` verifies that `libmaestro.so` exists in that directory and embeds it into the server binary's `rpath`.
-
-### Option C: Separate Header and Library Overrides
-
-You can override the header and library directory independently:
-
-| Input | Specific Override | With `MAESTRO_DIR` Set | Default (No Override) |
-| --- | --- | --- | --- |
-| Header | `MAESTRO_HEADER` | `$MAESTRO_DIR/maestrolib/Interface.h` | `$HOME/maestro/maestrolib/Interface.h` |
-| Library dir | `MAESTRO_LIBRARY_DIR` | `$MAESTRO_DIR/build` | System linker search + `/usr/local/lib` + `/usr/local` |
-
-```bash
-MAESTRO_HEADER=/opt/maestro/include/Interface.h \
-MAESTRO_LIBRARY_DIR=/opt/maestro/lib \
-cargo build --release
-```
-
-> **Note:** Cargo tracks only Maestro environment variables that were defined during the build. If you first set a previously unset override after a prior build, run `cargo clean -p maestro-local-server --release` before rebuilding. Without `--release`, Cargo cleans only the debug profile and the release binary keeps its old settings.
+`build.rs` verifies that `libmaestro.so` exists in `MAESTRO_LIBRARY_DIR` and embeds that directory in the server binary's runtime search path, so the service needs no `LD_LIBRARY_PATH` or `ldconfig` setup.
 
 The compiled binary is produced at:
 
 ```text
 target/release/maestro-local-server
 ```
+
+> **Note:** Cargo tracks only Maestro environment variables that were defined during the build. If you first set a previously unset override after a prior build, run `cargo clean -p maestro-local-server --release` before rebuilding. Without `--release`, Cargo cleans only the debug profile and the release binary keeps its old settings.
+
+### Using a different Maestro location
+
+The two variables above are the general mechanism. You can also point the build at a Maestro source checkout (see [Appendix A](#appendix-a-building-maestro-from-source)):
+
+| Input | Specific Override | With `MAESTRO_DIR` Set | Default (No Override) |
+| --- | --- | --- | --- |
+| Header | `MAESTRO_HEADER` | `$MAESTRO_DIR/maestrolib/Interface.h` | `$HOME/maestro/maestrolib/Interface.h` |
+| Library dir | `MAESTRO_LIBRARY_DIR` | `$MAESTRO_DIR/build` | System linker search + `/usr/local/lib` + `/usr/local` |
+
+For example, `MAESTRO_DIR=/path/to/maestro cargo build --release` builds against a Maestro checkout with its CMake build in `build/`. An explicit library directory must contain `libmaestro.so`.
 
 ---
 
@@ -178,7 +126,9 @@ cargo install cargo-deb
 cargo deb
 ```
 
-(Or `MAESTRO_DIR=/path/to/maestro cargo deb` if building against a specific Maestro checkout.)
+Run it with the same two variables as in section 3 (for example `MAESTRO_HEADER=/opt/maestro/include/maestrolib/Interface.h MAESTRO_LIBRARY_DIR=/opt/maestro/lib cargo deb`), or export them first.
+
+> **The package contains only the server, not `libmaestro.so`.** The server finds Maestro through the library directory embedded at build time (`/opt/maestro/lib` above), so every host that installs the package needs the Maestro archive extracted at that same path (section 2). Without it the service fails to start with `error while loading shared libraries: libmaestro.so`.
 
 This produces an archive under `target/debian/`:
 
@@ -266,8 +216,9 @@ Environment="MAESTRO_SESSION_LEASE_SECONDS=7200"
 # Only set this once the file exists. If MAESTRO_MPI_PROFILES points to a
 # missing or invalid file, the capabilities command fails with invalid_config.
 #Environment="MAESTRO_MPI_PROFILES=/etc/maestro/mpi-profiles.json"
-# Not needed when libmaestro.so is registered with ldconfig (section 2).
-#Environment="LD_LIBRARY_PATH=/usr/local/lib:/usr/local"
+# Not needed: the server binary finds libmaestro.so through the library
+# directory embedded at build time.
+#Environment="LD_LIBRARY_PATH=/opt/maestro/lib"
 ```
 
 Then reload and restart:
@@ -343,28 +294,23 @@ Verify that `"ok":true` is returned and inspect `server.build` and `native.backe
 
 ## 8. Troubleshooting
 
-### `call of overloaded 'serialize(double&)' is ambiguous` while building Maestro
-
-Maestro was configured against a Boost release older than 1.89. Build Boost 1.90 from source into `/usr/local` as shown in [section 1](#installing-system-packages), then delete Maestro's `build` directory and configure again so CMake picks up the new Boost.
-
-### `fatal error: immintrin.h: No such file or directory` while building Maestro
-
-You are building on an ARM (`aarch64`) host with Qiskit Aer enabled. Aer's sources use x86-only intrinsics. Configure Maestro with `-DENABLE_QISKIT_AER=OFF` (see [section 2](#2-building-and-installing-the-maestro-c-library)).
-
-### `c++: fatal error: Killed signal terminated program cc1plus` while building Maestro
-
-The compiler ran out of memory. Lower the parallel job count (for example, `cmake --build build -j2` or `-j1`) and run the build command again. It continues where it stopped.
-
 ### `error while loading shared libraries: libmaestro.so: cannot open shared object file`
 
-The runtime dynamic linker cannot find `libmaestro.so`. Either:
-- Install `libmaestro.so` to `/usr/local/lib` or `/usr/local`, add the path to `/etc/ld.so.conf.d/maestro.conf`, and run `sudo ldconfig`, or
-- Build with `MAESTRO_DIR=/path/to/maestro` or `MAESTRO_LIBRARY_DIR=/path/to/lib` so the library directory is embedded in the binary's `rpath`, or
-- Set `LD_LIBRARY_PATH` in the process or systemd environment.
+The server cannot find Maestro at the library directory embedded when it was built. Either:
+- Extract the Maestro archive at that path on this host (`/opt/maestro/lib` if you followed section 2); this is the usual cause when the `.deb` was installed on a different machine than it was built on, or
+- Rebuild with `MAESTRO_LIBRARY_DIR` pointing at where the library actually is, or
+- Set `LD_LIBRARY_PATH` in the process or systemd environment as a stopgap.
+
+The journal (`journalctl -u maestro.service`) shows the same message. After fixing the library path, clear systemd's failure state before restarting. The unit is set to restart on failure, and systemd stops retrying after several quick failures ("Start request repeated too quickly"), so a plain `restart` is refused:
+
+```bash
+sudo systemctl reset-failed maestro.service
+sudo systemctl restart maestro.service
+```
 
 ### `Maestro header not found at ...; set MAESTRO_DIR or MAESTRO_HEADER`
 
-`build.rs` could not find `Interface.h` at the default `$HOME/maestro/maestrolib/Interface.h` path. Set `MAESTRO_DIR=/path/to/maestro` or `MAESTRO_HEADER=/path/to/Interface.h` when running `cargo build`. Also ensure `InterfaceTypes.h` is present in the same directory as `Interface.h`.
+`build.rs` could not find `Interface.h`. Set `MAESTRO_HEADER=/opt/maestro/include/maestrolib/Interface.h` (or `MAESTRO_DIR=/path/to/maestro` for a source checkout) when running `cargo build`. `InterfaceTypes.h` must be in the same directory as `Interface.h`.
 
 ### `Unable to find libclang` during `cargo build`
 
@@ -374,6 +320,112 @@ The runtime dynamic linker cannot find `libmaestro.so`. Either:
 
 The daemon could not create its socket, for example because the directory in `MAESTRO_SOCKET` does not exist or is not writable by the service user. It exits with status 1 rather than running without a socket; check `journalctl -u maestro.service` for the cause.
 
+### `sha256sum: ... FAILED` or `no properly formatted checksum lines found`
+
+The download is incomplete or corrupt, or you downloaded the files for different versions. Delete both files from `/tmp` and repeat the download in section 2. Do not extract an archive that failed its check.
+
+### `curl: (22) The requested URL returned error: 404`
+
+There is no archive for that version and architecture. Archives exist for `x86_64` and `aarch64` only; check `uname -m`. On other platforms, build Maestro from source (Appendix A).
+
 ### `Permission denied` when connecting to `/run/maestro.sock`
 
 The socket is created with mode `0660` (`rw-rw----`). Ensure your user account is a member of the group under which `maestro-local-server` runs (`users` by default in `maestro.service`), or connect using a user in that group.
+
+---
+
+## Appendix A: Building Maestro from Source
+
+Build Maestro yourself when you need native features newer than the pinned release, when no archive exists for your platform, or when you want custom build options.
+
+### Choosing a revision
+
+- **To match the archive**, check out `v0.3.12`.
+- **For the newest native features**, check out the commit that CI tests this server against. It is `MAESTRO_REF` in [`.github/workflows/build-and-test.yml`](../.github/workflows/build-and-test.yml).
+
+Always build Maestro and `maestro-local-server` from compatible revisions.
+
+### Requirements
+
+Besides the packages in section 1, building Maestro needs CMake, Ninja, OpenBLAS and FFTW, and **Boost 1.89 or newer** with the `program_options`, `json`, `container` and `serialization` libraries. Older Boost releases (for example 1.83 on Ubuntu 24.04) fail to compile Maestro with `call of overloaded 'serialize(double&)' is ambiguous`.
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt-get install -y cmake ninja-build libfftw3-dev libopenblas-dev
+```
+
+Then install Boost. Check the version your distribution provides with `apt-cache policy libboost-all-dev`.
+
+- **Ubuntu 26.04 or newer** (Boost 1.90): install the distribution package:
+
+  ```bash
+  sudo apt-get install -y libboost-all-dev
+  ```
+
+- **Ubuntu 24.04 / 25.10 and other distributions with Boost older than 1.89**: build Boost from source into `/usr/local` (this is what CI does). Do not also install `libboost-all-dev`.
+
+  ```bash
+  cd /tmp
+  curl -L https://archives.boost.io/release/1.90.0/source/boost_1_90_0.tar.gz -o boost_1_90_0.tar.gz
+  tar -xzf boost_1_90_0.tar.gz
+  cd boost_1_90_0
+  ./bootstrap.sh --prefix=/usr/local
+  sudo ./b2 -j"$(nproc)" --with-program_options --with-json --with-container --with-serialization install
+  sudo ldconfig
+  ```
+
+**Fedora / RHEL:**
+
+```bash
+sudo dnf install -y cmake ninja-build fftw-devel boost-devel openblas-devel
+```
+
+Check that `rpm -q boost-devel` reports 1.89 or newer (Fedora 45 ships 1.90). If it is older, remove `boost-devel` from the command and build Boost from source as shown for Ubuntu above.
+
+### Building
+
+```bash
+git clone https://github.com/QoroQuantum/maestro.git "$HOME/maestro"
+cd "$HOME/maestro"
+git checkout v0.3.12   # or the MAESTRO_REF commit
+
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr/local \
+  -DBUILD_PYTHON_BINDINGS=OFF \
+  -DCOMPILE_TESTS=OFF
+
+cmake --build build -j2
+```
+
+`-DCOMPILE_TESTS=OFF` skips Maestro's own test binaries, which `maestro-local-server` does not need. This roughly halves the build time and memory use.
+
+> **ARM (`aarch64`) hosts:** Qiskit Aer, which is enabled by default, uses x86-only intrinsics and fails to build on ARM with `immintrin.h: No such file or directory`. Add `-DENABLE_QISKIT_AER=OFF` to the `cmake -S . -B build ...` command. The other backends are unaffected.
+
+> **Memory Tip:** Each Maestro compile job can use several gigabytes of RAM, more with Qiskit Aer enabled. With 8 GB of RAM, `-j3` runs out of memory, so the command above uses `-j2`. On machines with 32 GB or more, you can raise it (for example, `-j"$(nproc)"`). If the compiler is killed, rerun with `-j1`; the build continues where it stopped.
+
+### Building the server against it
+
+Point the server build at the checkout and its CMake build directory:
+
+```bash
+cd maestro-local-server
+MAESTRO_DIR="$HOME/maestro" cargo build --release
+```
+
+`MAESTRO_DIR` selects `$MAESTRO_DIR/maestrolib/Interface.h` and `$MAESTRO_DIR/build/libmaestro.so`; the build directory is embedded in the binary's runtime search path, so no `ldconfig` setup is needed. (Installing with `sudo cmake --install build` is only needed if you want other software to find Maestro in `/usr/local`; it places `libmaestro.so` directly in `/usr/local`, not `/usr/local/lib`.)
+
+### Troubleshooting the Maestro build
+
+#### `call of overloaded 'serialize(double&)' is ambiguous`
+
+Maestro was configured against a Boost release older than 1.89. Build Boost 1.90 from source into `/usr/local` as shown above, then delete Maestro's `build` directory and configure again so CMake picks up the new Boost.
+
+#### `fatal error: immintrin.h: No such file or directory`
+
+You are building on an ARM (`aarch64`) host with Qiskit Aer enabled. Configure Maestro with `-DENABLE_QISKIT_AER=OFF`.
+
+#### `c++: fatal error: Killed signal terminated program cc1plus`
+
+The compiler ran out of memory. Lower the parallel job count (for example, `cmake --build build -j2` or `-j1`) and run the build command again. It continues where it stopped.
