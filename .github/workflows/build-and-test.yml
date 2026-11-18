@@ -13,9 +13,10 @@ env:
   # server changes that rely on newer native features; the native API tests
   # require its adjoint, mirror-observable (including mixed-state methods),
   # mixed-state overlap/fidelity and instruction-noise support, readout refusal
-  # (including checkpoint prefixes), and whole-document result bound. Its
+  # (including checkpoint prefixes), whole-document result bound, and (from
+  # 0.3.15) statevector channel sampling without a noise block. Its
   # network_jobs test also passes on this 2-core runner.
-  MAESTRO_REF: 0ef2937c5f791f9855717ea42e439c22bf9765b7
+  MAESTRO_REF: 33c267f035189dc76d3958bae93af21800c81498
   # QRMI commit whose native integration suite exercises the full
   # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
   # needs no stored credentials. Update it with QRMI's Maestro client changes.

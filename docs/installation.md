@@ -39,10 +39,10 @@ source "$HOME/.cargo/env"
 
 ## 2. Installing Maestro (Prebuilt)
 
-This version of `maestro-local-server` is pinned to **Maestro 0.3.12**. Download the archive for your architecture, check it against the published checksums, and extract it to `/opt/maestro`:
+This version of `maestro-local-server` is pinned to **Maestro 0.3.15**. Download the archive for your architecture, check it against the published checksums, and extract it to `/opt/maestro`:
 
 ```bash
-MAESTRO_VERSION=0.3.12
+MAESTRO_VERSION=0.3.15
 ARCH=$(uname -m)   # x86_64 or aarch64
 BASE_URL="https://github.com/QoroQuantum/maestro/releases/download/v${MAESTRO_VERSION}"
 
@@ -68,7 +68,7 @@ The archive contains:
 Things to know:
 
 - The **x86_64** archive includes Qiskit Aer. The **aarch64** archive does not, because Aer uses x86-only intrinsics; the other backends are unaffected.
-- Maestro 0.3.12 predates the Maestro changes behind the server's newest native features: adjoint differentiation, observable mirror fidelity, mixed-state overlap and fidelity queries, instruction-level noise, and the readout and result-size checks. Requests that use them are rejected at submission with `unsupported_capability`; everything else works. To use them, build Maestro from the commit CI tests against (see [Appendix A](#appendix-a-building-maestro-from-source)).
+- Maestro 0.3.15 includes every native feature the server exposes, including adjoint differentiation, observable mirror fidelity, mixed-state overlap and fidelity queries, instruction-level noise and channel instructions. Seeded noisy results on the statevector and matrix product state differ from Maestro 0.3.14 and earlier (see [Native API v2](native-api-v2.md)).
 - There is no archive for other architectures or operating systems. Use Appendix A there.
 
 ---
@@ -342,8 +342,8 @@ Build Maestro yourself when you need native features newer than the pinned relea
 
 ### Choosing a revision
 
-- **To match the archive**, check out `v0.3.12`.
-- **For the newest native features**, check out the commit that CI tests this server against. It is `MAESTRO_REF` in [`.github/workflows/build-and-test.yml`](../.github/workflows/build-and-test.yml).
+- **To match the archive**, check out `v0.3.15`.
+- **To match CI**, check out the commit that CI tests this server against. It is `MAESTRO_REF` in [`.github/workflows/build-and-test.yml`](../.github/workflows/build-and-test.yml); for this version it is the `v0.3.15` commit.
 
 Always build Maestro and `maestro-local-server` from compatible revisions.
 
@@ -390,7 +390,7 @@ Check that `rpm -q boost-devel` reports 1.89 or newer (Fedora 45 ships 1.90). If
 ```bash
 git clone https://github.com/QoroQuantum/maestro.git "$HOME/maestro"
 cd "$HOME/maestro"
-git checkout v0.3.12   # or the MAESTRO_REF commit
+git checkout v0.3.15   # or the MAESTRO_REF commit
 
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \

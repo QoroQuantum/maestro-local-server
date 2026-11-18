@@ -758,15 +758,25 @@ fn newer_native_features_reach_the_worker_through_submit() {
     ]};
     channel["execution"]["shots"] = 16.into();
     assert_eq!(server.run(channel.clone())["counts"], object! {"1": 16});
-    // Pure states sample the channel, which needs a trajectory noise block.
+    // The statevector draws a branch of the channel as each shot runs, with or
+    // without a noise block.
     channel["simulator"]["method"] = "statevector".into();
+    assert_eq!(server.run(channel.clone())["counts"], object! {"1": 16});
+    channel["noise"] = object! {realizations: 16};
+    assert_eq!(server.run(channel.clone())["counts"], object! {"1": 16});
+    // Pure-state methods that do not sample channels take one Pauli per noise
+    // realization, which needs a trajectory noise block.
+    let mut unsampled = channel.clone();
+    unsampled.remove("noise");
+    unsampled["simulator"]["method"] = "path_integral".into();
+    unsampled["circuit"]["source"][0]["probabilities"] = json::array![0.5, 0.5, 0, 0];
     let session = server.session();
-    let refused = server.submit(session, channel.clone());
+    let refused = server.submit(session, unsampled);
     assert_eq!(
         refused["error"]["code"], "unsupported_capability",
         "{refused}"
     );
-    channel["noise"] = object! {realizations: 16};
+    channel["simulator"]["method"] = "path_integral".into();
     assert_eq!(server.run(channel)["counts"], object! {"1": 16});
 
     // Observable mirror fidelity.

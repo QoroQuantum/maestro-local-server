@@ -17,7 +17,7 @@
 # Prerequisites (guide section 1): Rust 1.85+, libclang, a C compiler, curl.
 set -euo pipefail
 
-MAESTRO_VERSION="${MAESTRO_VERSION:-0.3.12}"
+MAESTRO_VERSION="${MAESTRO_VERSION:-0.3.15}"
 MAESTRO_PREFIX="${MAESTRO_PREFIX:-/opt/maestro}"
 BASE_URL="https://github.com/QoroQuantum/maestro/releases/download/v${MAESTRO_VERSION}"
 

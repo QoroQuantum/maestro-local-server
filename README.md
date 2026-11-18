@@ -52,7 +52,7 @@ The server accepts newline-terminated commands in two protocol families on the s
 
 - Rust toolchain (stable, edition 2024) — install via [rustup](https://rustup.rs)
 - `libclang` (required by `bindgen` at build time), e.g. `sudo apt install libclang-dev`
-- The [Maestro](https://github.com/QoroQuantum/maestro) C library (`libmaestro.so` and `maestrolib/Interface.h`). This version is pinned to Maestro **0.3.12**, which has a prebuilt archive for Linux x86_64 and aarch64 on its [GitHub release](https://github.com/QoroQuantum/maestro/releases/tag/v0.3.12), so you do not need to build Maestro or install Boost. The newest native features need a newer Maestro built from source.
+- The [Maestro](https://github.com/QoroQuantum/maestro) C library (`libmaestro.so` and `maestrolib/Interface.h`). This version is pinned to Maestro **0.3.15**, which has a prebuilt archive for Linux x86_64 and aarch64 on its [GitHub release](https://github.com/QoroQuantum/maestro/releases/tag/v0.3.15), so you do not need to build Maestro or install Boost. The archive supports every native feature the server exposes.
 - For building the `.deb` package: `cargo install cargo-deb`
 
 See the [Installation and Deployment Guide](docs/installation.md) for full step-by-step instructions. With the prerequisites installed, `scripts/install.sh` downloads the pinned Maestro release, verifies it, and builds the server (add `--deb` to also install the package and start the service).

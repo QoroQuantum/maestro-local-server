@@ -106,8 +106,9 @@ Additional diagnostic fields are additive within API v2:
   Apply the saved values as `execution.seed` and `noise.seed` on the corresponding
   original request to replay it with the same backend, configuration and native
   library build (`native_build` below). Seeded samples are reproducible only
-  within one Maestro build: for example, Maestro 0.3.8 changed qubit compaction
-  and 0.3.9 disabled compiler multiply-add contraction, so earlier seeds can give
+  within one Maestro build: for example, Maestro 0.3.8 changed qubit compaction,
+  0.3.9 disabled compiler multiply-add contraction, and 0.3.15 changed how noise
+  is drawn on the statevector and matrix product state, so earlier seeds can give
   different samples (with the same distributions) on a newer library.
   Checkpoint batches retain their shared parent seed. Validation and results
   without a reported seed add no entries; deterministic adjoint results have no
@@ -228,6 +229,12 @@ Behaviour changes visible through the server: Maestro 0.3.10 made
 twirl is exactly depolarizing; it was a Z rotation), so results for that noise
 kind differ from earlier libraries. QASM circuits accept qelib1.inc's `rzz`,
 `rxx` and `u0` gates. Estimates remove terminal measurements before execution.
+Maestro 0.3.15 samples channels on the statevector and matrix product state from
+the state itself, so amplitude damping, relaxation with T2 > T1 and Kraus
+channels run as they are there instead of being approximated or rejected, and
+seeded noisy results on those methods differ from 0.3.14. A `checkpoint_batch`
+prefix may now hold resets, channel instructions and measurements that later
+prefix operations use, not only gates.
 
 The server deliberately uses Maestro's validation rules without translating old
 keys. Removed JSON options produce `invalid_input` during submission, before
@@ -258,6 +265,7 @@ no extra socket commands or persistent simulator handles are needed:
 | Two-qubit rotations in instruction arrays | `{"name": "rzz" or "rxx", "qubits": [a, b], "params": [theta]}` |
 | Per-gate and per-measurement noise controls | `"noiseless": true` on a gate; `"readout_error": p` or `{p_meas1_prep0, p_meas0_prep1}` on `measure` |
 | Pauli channel instructions | `{"name": "pauli_channel", "qubits": [...], "probabilities": [...]}` |
+| Structured channel instructions (Maestro 0.3.15+) | `{"name": "channel", "qubits": [...], "factors": [{"kind": "depolarizing", "probability": p}, ...]}` |
 | Mixed-state overlap `Tr(rho sigma)` | `operation: "density_matrix_overlap"`, `other_circuit` (density matrix or MPO) |
 | Fidelity of a mixed state with a pure target | `operation: "fidelity_with_statevector"`, `target_statevector` (normalized `[real, imaginary]` amplitudes, at most 20 qubits) |
 
@@ -286,10 +294,14 @@ parameter rows:
  "observables":["Z",{"probabilities":[0]}],"parameter_rows":[[0.3],[1.1]]}}
 ```
 
-A `pauli_channel` is applied exactly on density-matrix and MPO methods. Pure-state
-and MPS methods sample one Pauli per noise realization and require a `noise`
-block with trajectory evaluation, whose `channels` may be omitted; set
-`noise.realizations` to the shot count for independent draws. `readout_error`
+A channel instruction (`pauli_channel`, `kraus`, `channel`) is applied exactly on
+density-matrix and MPO methods and on the QCSim `pauli_propagator`. The
+`statevector` and `matrix_product_state` draw one branch from the state each time
+a shot runs, with or without a `noise` block. Other pure-state methods (such as
+`path_integral` or the stabilizers) sample one Pauli per noise realization and
+require a `noise` block with trajectory evaluation, whose `channels` may be
+omitted; set `noise.realizations` to the shot count for independent draws. They
+reject channels whose branches depend on the state. `readout_error`
 applies only to `execute` and `checkpoint_batch` counts and composes with a
 noise model's readout. `rxx`/`rzz` instructions expand exactly like the QASM
 gates.
