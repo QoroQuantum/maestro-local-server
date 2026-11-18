@@ -160,12 +160,17 @@ pub(super) struct WorkerResult {
 
 // Retain only bounded identifiers, never an arbitrary worker document.
 fn native_build(value: &json::JsonValue) -> Option<json::JsonValue> {
+    use crate::maestro::diagnostics::bounded;
     let version = value["version"].as_str()?;
     let revision = value["source_revision"].as_str()?;
-    Some(json::object! {
-        version: crate::maestro::diagnostics::bounded(version, 256),
-        source_revision: crate::maestro::diagnostics::bounded(revision, 256),
-    })
+    let mut build = json::object! {
+        version: bounded(version, 256),
+        source_revision: bounded(revision, 256),
+    };
+    if let Some(qcsim) = value["qcsim_revision"].as_str() {
+        build["qcsim_revision"] = bounded(qcsim, 256).into();
+    }
+    Some(build)
 }
 
 pub(super) fn read_result(reader: &mut impl Read, task: &Task) -> io::Result<WorkerResult> {

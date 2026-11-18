@@ -116,7 +116,8 @@ Additional diagnostic fields are additive within API v2:
   indicates unvisited results. This seed history has the same lifetime as the
   other diagnostics, not disk persistence.
 - `native_build` is `{version, source_revision}` of the Maestro library loaded by
-  the worker that ran the task, as reported by that worker, or `null` when
+  the worker that ran the task, plus `qcsim_revision` when the library reports
+  it (Maestro 0.3.15 and later), as reported by that worker, or `null` when
   unknown (queued or cancelled before a result, or an MPI task, whose ranks load
   the separate `maestro-mpi-worker` library). Workers are fresh processes, so
   after replacing `libmaestro.so` this can differ from the daemon's own

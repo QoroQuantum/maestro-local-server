@@ -660,9 +660,11 @@ fn routing_reduction_trajectory_and_gpu_pauli_options_keep_their_contract() {
             object! {trajectory_policy: "per_shot"},
             "invalid_input",
         ),
+        // Every QCSim trajectory method takes a policy since Maestro 0.3.14;
+        // the tensor network runs no trajectories.
         (
             "qcsim",
-            "matrix_product_state",
+            "tensor_network",
             object! {trajectory_policy: "shot_v1"},
             "unsupported_capability",
         ),
