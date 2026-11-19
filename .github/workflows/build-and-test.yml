@@ -20,8 +20,12 @@ env:
   # QRMI commit whose native integration suite exercises the full
   # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
   # needs no stored credentials. Update it with QRMI's Maestro client changes
-  # and when a new MAESTRO_REF changes behaviour its tests check.
-  QRMI_REF: d21841d7d598e328f1b976393c13449b064dc353
+  # and when a new MAESTRO_REF changes behaviour its tests check. Maestro Local
+  # is maintained in qiskit-community/qrmi; this commit is upstream main plus
+  # the Maestro 0.3.15 test expectations, on QoroQuantum's fork until that
+  # change is merged upstream.
+  QRMI_REPOSITORY: QoroQuantum/qrmi
+  QRMI_REF: eea2274113f82e5278466f1164e2a2257a861afd
 
 jobs:
   build-and-test:
@@ -194,7 +198,7 @@ jobs:
         run: |
           QRMI_DIR="$RUNNER_TEMP/qrmi"
           git init -q "$QRMI_DIR"
-          git -C "$QRMI_DIR" remote add origin https://github.com/QoroQuantum/qrmi.git
+          git -C "$QRMI_DIR" remote add origin "https://github.com/$QRMI_REPOSITORY.git"
           git -C "$QRMI_DIR" fetch --depth 1 origin "$QRMI_REF"
           git -C "$QRMI_DIR" checkout -q --detach FETCH_HEAD
           test "$(git -C "$QRMI_DIR" rev-parse HEAD)" = "$QRMI_REF"
