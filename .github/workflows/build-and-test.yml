@@ -19,8 +19,9 @@ env:
   MAESTRO_REF: 33c267f035189dc76d3958bae93af21800c81498
   # QRMI commit whose native integration suite exercises the full
   # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
-  # needs no stored credentials. Update it with QRMI's Maestro client changes.
-  QRMI_REF: 278ae9e6a94cc84872f51fb173df255ebb16cd86
+  # needs no stored credentials. Update it with QRMI's Maestro client changes
+  # and when a new MAESTRO_REF changes behaviour its tests check.
+  QRMI_REF: d21841d7d598e328f1b976393c13449b064dc353
 
 jobs:
   build-and-test:
