@@ -25,7 +25,7 @@ env:
   # the Maestro 0.3.15 test expectations, on QoroQuantum's fork until that
   # change is merged upstream.
   QRMI_REPOSITORY: QoroQuantum/qrmi
-  QRMI_REF: eea2274113f82e5278466f1164e2a2257a861afd
+  QRMI_REF: 8690b83fb2e0943ee4ca8b6789cfa629af018f22
 
 jobs:
   build-and-test:
