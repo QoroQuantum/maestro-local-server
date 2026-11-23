@@ -21,12 +21,10 @@ env:
   # QRMI -> server -> Maestro path. QRMI and Maestro are public, so this job
   # needs no stored credentials. Update it with QRMI's Maestro client changes
   # and when a new MAESTRO_REF changes behaviour its tests check. Maestro Local
-  # is maintained in qiskit-community/qrmi; this commit is upstream main plus
-  # the Maestro 0.3.15 test expectations, on QoroQuantum's fork until that
-  # change is merged upstream (qiskit-community/qrmi#367). Then set
-  # QRMI_REPOSITORY to qiskit-community/qrmi and QRMI_REF to the merged commit.
-  QRMI_REPOSITORY: QoroQuantum/qrmi
-  QRMI_REF: 8690b83fb2e0943ee4ca8b6789cfa629af018f22
+  # is maintained in qiskit-community/qrmi; this commit is its main after the
+  # Maestro 0.3.14/0.3.15 test expectations merged (qiskit-community/qrmi#367).
+  QRMI_REPOSITORY: qiskit-community/qrmi
+  QRMI_REF: 6269dfe84244d1432b94ebed63f44275f63615b5
 
 jobs:
   build-and-test:
