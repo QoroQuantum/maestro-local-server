@@ -296,13 +296,17 @@ parameter rows:
 ```
 
 A channel instruction (`pauli_channel`, `kraus`, `channel`) is applied exactly on
-density-matrix and MPO methods and on the QCSim `pauli_propagator`. The
-`statevector` and `matrix_product_state` draw one branch from the state each time
-a shot runs, with or without a `noise` block. Other pure-state methods (such as
-`path_integral` or the stabilizers) sample one Pauli per noise realization and
-require a `noise` block with trajectory evaluation, whose `channels` may be
-omitted; set `noise.realizations` to the shot count for independent draws. They
-reject channels whose branches depend on the state. `readout_error`
+density-matrix and MPO methods and on the QCSim `pauli_propagator`. Since
+Maestro 0.3.15, the CPU `statevector` and `matrix_product_state` (QCSim, Aer and
+their composite backends) run channels without a `noise` block and draw a branch
+each time a shot runs. With a trajectory `noise` block, they still draw channels
+whose branches depend on the state on each shot, but draw a Pauli channel once per
+noise realization, so shots in one realization share it. Other pure-state methods
+(such as `path_integral`, the stabilizers and the GPU statevector and MPS) sample
+one Pauli per noise realization and require a `noise` block with trajectory
+evaluation, whose `channels` may be omitted. They reject channels whose branches
+depend on the state. Under a noise block, set `noise.realizations` to the shot
+count for independent Pauli draws per shot. `readout_error`
 applies only to `execute` and `checkpoint_batch` counts and composes with a
 noise model's readout. `rxx`/`rzz` instructions expand exactly like the QASM
 gates.
